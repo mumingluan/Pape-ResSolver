@@ -1,0 +1,125 @@
+# Pape-ResSolver
+
+`Pape-ResSolver` converts normalized Pape resource dumps into server-friendly,
+human-readable configuration data while preserving provenance. It is designed
+around the resource manifests rather than fixed package IDs, so the same code
+can be reused across resource versions.
+
+The project has three complementary outputs:
+
+- configuration Lua (`LuaCfg.*`) is statically evaluated and normalized with
+  its `_k` schema into JSONL and SQLite;
+- logic Lua is indexed by resolved source name, dependencies, RPC references,
+  configuration references and content hash.
+- decoded MessagePack, text, X3 and auxiliary config artifacts are cataloged,
+  materialized and consolidated into server-friendly package JSONL files.
+
+The Lua reader does **not** execute game code. It evaluates the restricted data
+construction subset emitted by the existing Lua 5.3 decompiler, preserving
+integers and representing unsupported expressions explicitly.
+
+## Quick start
+
+```powershell
+python -m pape_res_solver extract `
+  D:\path\to\normalized-resources `
+  --output .\out\resource-version `
+  --export-scripts useful `
+  --materialize-tables hardlink
+```
+
+Useful focused run while developing:
+
+```powershell
+python -m pape_res_solver extract D:\path\to\normalized-resources `
+  --output .\out\gacha `
+  --table CardBaseInfo --table Item --table GachaAll `
+  --table GachaGroup --table GachaRule --table GachaDrop
+```
+
+Output layout:
+
+```text
+out/<version>/
+  catalog.json
+  resources.sqlite
+  tables/*.jsonl
+  schemas/*.json
+  scripts/catalog.jsonl
+  scripts/**/*.lua
+  server_tables/msgpack/*.jsonl
+  server_tables/config/*.jsonl
+  artifacts/tables/**
+  reports/parse_failures.json
+  reports/unresolved_values.json
+  reports/references.json
+  reports/lua_index.json
+  reports/artifacts.json
+```
+
+Every catalog entry records the source package, entry index, source path,
+content hash, row count and schema fingerprint. JSONL rows remain clean config
+objects; provenance is available in the catalog and SQLite metadata.
+
+## Extraction model
+
+The source manifest's resolved names are authoritative. Package IDs and entry
+numbers are never hard-coded. If the next resource version moves `LuaCfg.Item`
+to another package, the output remains `tables/Item.jsonl` and its new source is
+recorded in `catalog.json`.
+
+The extractor loads standard Lua 5.3 bytecode in a restricted environment.
+Android chunks in the current dump use 32-bit `size_t`; the bytecode converter
+rewrites only binary chunk string-size fields for the local 64-bit Lua 5.3
+runtime. This preserves Lua integers and corrects `SETLIST` ordering artifacts
+that are present in decompiled source. The static source parser remains a
+diagnostic fallback.
+
+Unity value constructors such as `Vector2`, `Vector3`, `Quaternion` and `Color`
+become tagged JSON objects. No filesystem, network, process, package or debug
+APIs are exposed to resource chunks.
+
+## SQLite API
+
+`resources.sqlite` contains stable generic tables suitable for a Go or Python
+game server:
+
+- `config_tables` and `config_rows`: named `LuaCfg` tables and JSON rows;
+- `config_references`: validated Card/Item/Gacha relationships;
+- `lua_scripts` and `lua_dependencies`: source, require, config and RPC index;
+- `resource_packages` and `resource_files`: normalized resource inventory;
+- `decoded_table_rows`: consolidated MessagePack/X3/auxiliary config rows.
+
+Example:
+
+```sql
+select json_extract(data_json, '$.FragmentID')
+from config_rows
+where table_name = 'CardBaseInfo' and row_key = '121130';
+```
+
+The CLI provides the same common lookup without writing SQL:
+
+```powershell
+python -m pape_res_solver query .\out\1.7.1546 CardBaseInfo 121130
+python -m pape_res_solver find-id .\out\1.7.1546 121130
+python -m pape_res_solver verify .\out\1.7.1546
+```
+
+## Materialization modes
+
+- `hardlink` (default): self-contained output on the same volume without
+  duplicating physical table bytes; falls back to copying when unsupported.
+- `copy`: ordinary independent copies.
+- `none`: catalog and consolidated outputs only.
+
+`--clean` only removes directories containing Pape-ResSolver's output marker.
+It refuses to recursively remove an arbitrary unmarked directory.
+
+## Repository hygiene
+
+Recovered resource inputs and generated outputs are intentionally excluded from
+Git. Keep them in `resources/`, `source/`, `input/` or `out/`, or outside the
+repository entirely. Only the original solver source code, tests and
+documentation are intended for publication under MIT; see `NOTICE` for the
+third-party data boundary.

@@ -1,0 +1,25 @@
+/.venv/
+/build/
+/dist/
+/out/
+
+# Local/private resource inputs. Never publish recovered game data.
+/resources/
+/resource_source/
+/source/
+/sources/
+/input/
+/inputs/
+/fixtures/private/
+
+*.egg-info/
+__pycache__/
+*.py[cod]
+.coverage
+coverage.xml
+.pytest_cache/
+.ruff_cache/
+.env
+.env.*
+.DS_Store
+Thumbs.db

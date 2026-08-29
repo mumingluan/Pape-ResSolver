@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pape-res-solver"
+version = "0.1.0"
+description = "Version-tolerant normalizer and indexer for Pape game resources"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Pape-ResSolver contributors"}]
+keywords = ["lua", "resource-extraction", "game-server", "configuration", "reverse-engineering"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = ["lupa>=2.8,<3"]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.16,<1"]
+
+[project.urls]
+Homepage = "https://github.com/mumingluan/Pape-ResSolver"
+Repository = "https://github.com/mumingluan/Pape-ResSolver"
+Issues = "https://github.com/mumingluan/Pape-ResSolver/issues"
+
+[project.scripts]
+pape-res = "pape_res_solver.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pape_res_solver*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
