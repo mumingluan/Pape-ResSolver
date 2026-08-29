@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,8 +88,8 @@ class ResourceManifest:
         return entries
 
     def resolve(self, relative_path: str) -> Path:
-        normalized = relative_path.replace("/", "\\")
-        return self.root / Path(normalized)
+        normalized = relative_path.replace("\\", "/")
+        return self.root.joinpath(*PurePosixPath(normalized).parts)
 
     def version_metadata(self) -> dict[str, object]:
         root_manifest = self.root / "manifest.json"
