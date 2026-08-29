@@ -61,11 +61,10 @@ class VersionedPipelineTests(unittest.TestCase):
             )
             self.assertEqual(result["totals"]["succeeded"], 1)
             self.assertEqual(result["tables"][0]["package_id"], 987654321)
-            self.assertEqual(
-                ExtractionPipeline(root, output).manifest.resolve(
-                    "lua_source\\by_package\\987654321\\000007.lua"
-                ),
-                source_dir / "000007.lua",
+            self.assertTrue(
+                ExtractionPipeline(root, output)
+                .manifest.resolve("lua_source\\by_package\\987654321\\000007.lua")
+                .samefile(source_dir / "000007.lua")
             )
             row = json.loads((output / "tables" / "PortableExample.jsonl").read_text())
             self.assertEqual(row, {"ID": 77, "Name": "portable"})
