@@ -106,6 +106,51 @@ python -m pape_res_solver find-id .\out\1.7.1546 121130
 python -m pape_res_solver verify .\out\1.7.1546
 ```
 
+## Compact runtime SQLite
+
+The full database also contains Lua indexes, artifact inventory, and decoded
+package research data. Create a smaller server runtime database while keeping
+all named configuration tables:
+
+```powershell
+python -m pape_res_solver trim `
+  .\out\1.7.1546\resources.sqlite `
+  .\out\1.7.1546\booi-res.sqlite `
+  --resource-version 1.7.1546
+```
+
+Use repeatable `--table` arguments to retain only an explicit allowlist. For
+example:
+
+```powershell
+python -m pape_res_solver trim resources.sqlite booi-res.sqlite `
+  --table Task --table Item --table ItemType `
+  --table CardBaseInfo --table CardRare `
+  --table GachaAll --table GachaGroup --table GachaRule --table GachaDrop
+```
+
+The compact database contains `resource_metadata`, `config_tables`,
+`config_rows`, and validated `config_references`. Tables use `WITHOUT ROWID`
+where appropriate. Analysis-only indexes and decoded artifacts are omitted.
+The output is built into a temporary file, integrity checked, and atomically
+renamed. Existing outputs are preserved unless `--force` is passed.
+
+## Automatic LuaCfg name recovery
+
+The solver does not require compatibility rows such as `Recovered.*` for
+stripped or hotfix configuration chunks. Before extraction it scans game Lua
+calls for authoritative `LuaCfgMgr` registry names and resolves chunks using:
+
+1. an exact XLua CRC match for ordinary `LuaCfg.<Table>` chunks; or
+2. a unique, reciprocal match between fields used by game code and the schema
+   returned by an executable configuration chunk when a hotfix uses a physical
+   name different from its registry name.
+
+Only evidence-backed unique matches are accepted. Ambiguous candidates remain
+unresolved and are listed in `reports/config_name_resolution.json`; names are
+never guessed. The recovered canonical table names flow into JSONL, SQLite,
+Lua indexing, verification, and compact runtime SQLite outputs automatically.
+
 ## Materialization modes
 
 - `hardlink` (default): self-contained output on the same volume without

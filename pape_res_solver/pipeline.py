@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import process_artifacts
+from .config_recovery import recover_config_names
 from .lua_index import index_lua_sources
 from .lua_runtime import Lua53ConfigRuntime
 from .lua_static import parse_static_lua
@@ -48,6 +49,7 @@ class ExtractionPipeline:
         self.schemas_dir.mkdir(parents=True, exist_ok=True)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         (self.output / ".pape-res-output").write_text("pape-res-solver-output-v1\n", encoding="ascii")
+        name_resolution_report = recover_config_names(self.manifest, self.runtime)
         entries = self.manifest.config_entries(selected)
         catalog: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
@@ -108,6 +110,7 @@ class ExtractionPipeline:
         self._write_json(self.reports_dir / "parse_failures.json", failures)
         self._write_json(self.reports_dir / "unresolved_values.json", unresolved)
         self._write_json(self.reports_dir / "references.json", reference_report)
+        self._write_json(self.reports_dir / "config_name_resolution.json", name_resolution_report)
         if lua_index_report is not None:
             self._write_json(self.reports_dir / "lua_index.json", lua_index_report)
         self._write_json(self.reports_dir / "artifacts.json", artifact_report)

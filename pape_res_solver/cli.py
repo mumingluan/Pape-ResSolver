@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .pipeline import ExtractionPipeline
+from .sqlite_trim import trim_sqlite
 from .verify import verify_output
 
 
@@ -41,6 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
     find_id.add_argument("--limit", type=int, default=100)
     verify = commands.add_parser("verify", help="verify a generated output directory")
     verify.add_argument("output", type=Path)
+    trim = commands.add_parser("trim", help="create a compact runtime SQLite from resources.sqlite")
+    trim.add_argument("input", type=Path, help="full resources.sqlite")
+    trim.add_argument("output", type=Path, help="compact output SQLite")
+    trim.add_argument("--table", action="append", default=[], help="config table to retain; repeatable")
+    trim.add_argument("--resource-version", help="resource/hotfix version stored in output metadata")
+    trim.add_argument("--no-references", action="store_true", help="omit validated config references")
+    trim.add_argument("--force", action="store_true", help="atomically replace an existing output")
     return parser
 
 
@@ -89,6 +97,21 @@ def main(argv: list[str] | None = None) -> int:
         report = verify_output(args.output)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["valid"] else 2
+    if args.command == "trim":
+        try:
+            report = trim_sqlite(
+                args.input,
+                args.output,
+                tables=args.table,
+                resource_version=args.resource_version,
+                include_references=not args.no_references,
+                force=args.force,
+            )
+        except (FileExistsError, OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            print(f"trim failed: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
     return 1
 
 

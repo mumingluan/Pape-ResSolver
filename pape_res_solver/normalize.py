@@ -83,10 +83,13 @@ def _schema_position(spec: Any) -> int | None:
 def _decode_nested(value: Any, schema: LuaTable) -> Any:
     if not isinstance(value, LuaTable):
         return to_jsonable(value)
-    sequence = [value.get(index) for index in range(1, value.array_extent + 1)]
-    non_nil = [item for item in sequence if item is not None]
+    # Runtime-produced grouped tables can report array_extent=0 or use sparse,
+    # very large integer keys. Iterate actual keys rather than allocating a
+    # range up to the largest ID.
+    integer_keys = sorted(key for key in value.values if isinstance(key, int) and key > 0)
+    non_nil = [value.get(key) for key in integer_keys if value.get(key) is not None]
     if non_nil and all(isinstance(item, LuaTable) for item in non_nil):
-        return [_decode_row(item, schema) for item in sequence if item is not None]
+        return [_decode_row(item, schema) for item in non_nil]
     return _decode_row(value, schema)
 
 
@@ -145,7 +148,11 @@ def normalize_config_table(value: Any) -> NormalizedTable:
     for key in _sorted_keys(key for key in value.values if key != "_k"):
         row = value.get(key)
         normalized = (
-            _decode_row(row, schema)
+            # Some LuaCfg tables group multiple schema-shaped rows under one
+            # primary key (for example, month -> daily sign rows).  Decode the
+            # value through the same nested-row discriminator used by nested
+            # schema fields so dense and sparse row arrays are preserved.
+            _decode_nested(row, schema)
             if isinstance(row, LuaTable) and isinstance(schema, LuaTable)
             else to_jsonable(row)
         )
