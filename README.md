@@ -13,6 +13,8 @@ The project has three complementary outputs:
   configuration references and content hash.
 - decoded MessagePack, text, X3 and auxiliary config artifacts are cataloged,
   materialized and consolidated into server-friendly package JSONL files.
+- catalog multilingual resource sets are reconstructed as ID-addressable text
+  in a separate `languages.sqlite`, independent from the main Res database.
 
 The Lua reader does **not** execute game code. It evaluates the restricted data
 construction subset emitted by the existing Lua 5.3 decompiler, preserving
@@ -43,6 +45,7 @@ Output layout:
 out/<version>/
   catalog.json
   resources.sqlite
+  languages.sqlite
   tables/*.jsonl
   schemas/*.json
   scripts/catalog.jsonl
@@ -103,8 +106,35 @@ The CLI provides the same common lookup without writing SQL:
 ```powershell
 python -m pape_res_solver query .\out\1.7.1546 CardBaseInfo 121130
 python -m pape_res_solver find-id .\out\1.7.1546 121130
+python -m pape_res_solver text .\out\1.7.1546 377066
 python -m pape_res_solver verify .\out\1.7.1546
 ```
+
+## Multilanguage SQLite
+
+`languages.sqlite` is rebuilt atomically from Get's
+`multilanguage/manifest.json`. It does not add rows to `resources.sqlite` or
+the BOOI-trimmed database. Its stable runtime tables are:
+
+- `language_resource_sets`: every catalog language resource set and its counts;
+- `language_packages`: NX/NXF provenance, key type and dependency packages;
+- `localized_text`: `(resource_set_id, text_id) -> UTF-8 text`;
+- `language_metadata`: schema and source-version information.
+
+The resource-set ID is the authoritative cross-version language key. This
+avoids guessing locale names when a regional client publishes only a subset of
+text or voice languages. Servers may attach their own display labels while
+keeping lookups stable:
+
+```sql
+select text from localized_text
+where resource_set_id = 1000000000001 and text_id = 377066;
+```
+
+Get downloads the small `Total/XFileZip/*.zip` members already present in its
+normal pipeline; it does not need the much larger `Packages/b_*.zip` image and
+voice aggregates. Incremental Get runs reuse the ordinary download cache and
+regenerate a full resource-set manifest after normalization.
 
 ## Compact runtime SQLite
 

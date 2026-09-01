@@ -14,6 +14,7 @@ from .lua_index import index_lua_sources
 from .lua_runtime import Lua53ConfigRuntime
 from .lua_static import parse_static_lua
 from .manifest import LuaSourceEntry, ResourceManifest
+from .multilanguage import export_multilanguage_sqlite
 from .normalize import normalize_config_table, safe_table_filename
 from .validate import validate_references
 
@@ -38,6 +39,7 @@ class ExtractionPipeline:
         index_lua: bool = True,
         export_scripts: str = "useful",
         materialize_tables: str = "hardlink",
+        extract_multilanguage: bool = True,
     ) -> dict[str, Any]:
         if clean and self.output.exists():
             marker = self.output / ".pape-res-output"
@@ -92,6 +94,11 @@ class ExtractionPipeline:
             database.commit()
         finally:
             database.close()
+        language_report = (
+            export_multilanguage_sqlite(self.manifest.root, self.output / "languages.sqlite")
+            if extract_multilanguage
+            else {"available": False, "reason": "disabled by command line"}
+        )
         catalog_document = {
             "schema": "pape-res-solver-catalog-v1",
             "generated_at": datetime.now(UTC).isoformat(),
@@ -103,8 +110,11 @@ class ExtractionPipeline:
                 "failed": len(failures),
                 "rows": sum(int(item["row_count"]) for item in catalog),
                 "unresolved_values": sum(int(item["unresolved_values"]) for item in catalog),
+                "language_resource_sets": language_report.get("counts", {}).get("resource_sets", 0),
+                "localized_texts": language_report.get("counts", {}).get("texts", 0),
             },
             "tables": catalog,
+            "multilanguage": language_report,
         }
         self._write_json(self.output / "catalog.json", catalog_document)
         self._write_json(self.reports_dir / "parse_failures.json", failures)
@@ -114,6 +124,7 @@ class ExtractionPipeline:
         if lua_index_report is not None:
             self._write_json(self.reports_dir / "lua_index.json", lua_index_report)
         self._write_json(self.reports_dir / "artifacts.json", artifact_report)
+        self._write_json(self.reports_dir / "multilanguage.json", language_report)
         return catalog_document
 
     def _extract_entry(self, entry: LuaSourceEntry, database: sqlite3.Connection) -> dict[str, Any]:

@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="hardlink",
         help="how to materialize decoded table/config/package artifacts",
     )
+    extract.add_argument(
+        "--no-multilanguage",
+        action="store_true",
+        help="skip independent languages.sqlite generation",
+    )
     query = commands.add_parser("query", help="query one named config row")
     query.add_argument("output", type=Path, help="output directory or resources.sqlite")
     query.add_argument("table", help="normalized table name")
@@ -40,6 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     find_id.add_argument("output", type=Path, help="output directory or resources.sqlite")
     find_id.add_argument("key", help="row key")
     find_id.add_argument("--limit", type=int, default=100)
+    text = commands.add_parser("text", help="query localized text by numeric ID")
+    text.add_argument("output", type=Path, help="output directory or languages.sqlite")
+    text.add_argument("text_id", type=int)
+    text.add_argument("--resource-set", type=int)
     verify = commands.add_parser("verify", help="verify a generated output directory")
     verify.add_argument("output", type=Path)
     trim = commands.add_parser("trim", help="create a compact runtime SQLite from resources.sqlite")
@@ -62,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             index_lua=not args.no_lua_index,
             export_scripts=args.export_scripts,
             materialize_tables=args.materialize_tables,
+            extract_multilanguage=not args.no_multilanguage,
         )
         print(json.dumps(result["totals"], ensure_ascii=False, indent=2))
         return 0 if result["totals"]["failed"] == 0 else 2
@@ -90,6 +100,30 @@ def main(argv: list[str] | None = None) -> int:
                     indent=2,
                 )
             )
+            return 0 if rows else 1
+        finally:
+            database.close()
+    if args.command == "text":
+        database_path = args.output if args.output.suffix == ".sqlite" else args.output / "languages.sqlite"
+        database = sqlite3.connect(database_path)
+        try:
+            if args.resource_set is None:
+                rows = database.execute(
+                    """select resource_set_id, text from localized_text
+                       where text_id = ? order by resource_set_id""",
+                    (args.text_id,),
+                ).fetchall()
+            else:
+                rows = database.execute(
+                    """select resource_set_id, text from localized_text
+                       where resource_set_id = ? and text_id = ?""",
+                    (args.resource_set, args.text_id),
+                ).fetchall()
+            print(json.dumps(
+                [{"resource_set_id": row[0], "text_id": args.text_id, "text": row[1]} for row in rows],
+                ensure_ascii=False,
+                indent=2,
+            ))
             return 0 if rows else 1
         finally:
             database.close()

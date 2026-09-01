@@ -59,6 +59,45 @@ def verify_output(output: Path, write_report: bool = True) -> dict[str, Any]:
     if counts["config_rows"] != catalog["totals"]["rows"] or actual_rows != catalog["totals"]["rows"]:
         failures.append("normalized config row totals do not agree")
 
+    language_report = catalog.get("multilanguage", {})
+    language_verification: dict[str, Any] = {"available": False}
+    if language_report.get("available"):
+        language_path = output / str(language_report.get("database") or "languages.sqlite")
+        if not language_path.is_file():
+            failures.append("missing multilingual SQLite output")
+        else:
+            language_database = sqlite3.connect(language_path)
+            try:
+                language_integrity = language_database.execute("pragma integrity_check").fetchone()[0]
+                language_counts = {
+                    "resource_sets": language_database.execute(
+                        "select count(*) from language_resource_sets"
+                    ).fetchone()[0],
+                    "packages": language_database.execute(
+                        "select count(*) from language_packages"
+                    ).fetchone()[0],
+                    "texts": language_database.execute(
+                        "select count(*) from localized_text"
+                    ).fetchone()[0],
+                }
+                language_schema = language_database.execute(
+                    "select value from language_metadata where key = 'schema'"
+                ).fetchone()
+            finally:
+                language_database.close()
+            language_verification = {
+                "available": True,
+                "integrity": language_integrity,
+                "schema": language_schema[0] if language_schema else None,
+                "counts": language_counts,
+            }
+            if language_integrity != "ok":
+                failures.append(f"language SQLite integrity check: {language_integrity}")
+            if language_verification["schema"] != language_report.get("schema"):
+                failures.append("language SQLite schema does not match catalog")
+            if language_counts != language_report.get("counts"):
+                failures.append("language SQLite counts do not match catalog")
+
     parse_failures = json.loads((output / "reports" / "parse_failures.json").read_text(encoding="utf-8"))
     references = json.loads((output / "reports" / "references.json").read_text(encoding="utf-8"))
     lua_index = json.loads((output / "reports" / "lua_index.json").read_text(encoding="utf-8"))
@@ -86,6 +125,7 @@ def verify_output(output: Path, write_report: bool = True) -> dict[str, Any]:
         "file_rows": actual_rows,
         "sqlite_integrity": integrity,
         "sqlite_counts": counts,
+        "multilanguage": language_verification,
         "known_references": references["totals"],
         "lua_entries": lua_index["totals"],
         "artifact_totals": artifacts["totals"],

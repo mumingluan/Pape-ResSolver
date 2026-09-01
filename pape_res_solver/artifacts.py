@@ -336,42 +336,17 @@ def _normalize_config_artifacts(
 
     language_manifest = manifest.root / "config" / "MultiLanguagePackageManiFest.bin"
     if language_manifest.is_file():
-        raw = language_manifest.read_bytes()
-        try:
-            text = raw.decode("ascii")
-            if len(text) % 64 or not re.fullmatch(r"[0-9a-fA-F]+", text):
-                raise ValueError("content is not a concatenated SHA-256 list")
-            hashes = [text[index : index + 64].lower() for index in range(0, len(text), 64)]
-            path = destination / "MultiLanguagePackageManifest.jsonl"
-            with path.open("w", encoding="ascii", newline="\n") as output_file:
-                for index, digest in enumerate(hashes, 1):
-                    row = {"index": index, "sha256": digest}
-                    raw_row = json.dumps(row, separators=(",", ":"))
-                    output_file.write(raw_row + "\n")
-                    database.execute(
-                        """insert or replace into decoded_table_rows(
-                            package_id, entry_key, table_name, format, data_json, source_path
-                        ) values (-2, ?, 'MultiLanguagePackageManifest', 'sha256-list', ?, ?)""",
-                        (
-                            str(index),
-                            raw_row,
-                            str(language_manifest.relative_to(manifest.root)).replace("\\", "/"),
-                        ),
-                    )
-            result["decoded"].append(
-                {
-                    "name": "MultiLanguagePackageManifest",
-                    "rows": len(hashes),
-                    "path": str(path.relative_to(output)).replace("\\", "/"),
-                }
-            )
-        except (OSError, UnicodeError, sqlite3.Error, TypeError, ValueError) as error:
-            result["unresolved"].append(
-                {
-                    "path": str(language_manifest.relative_to(manifest.root)),
-                    "error": f"{type(error).__name__}: {error}",
-                }
-            )
+        result["unresolved"].append(
+            {
+                "path": str(language_manifest.relative_to(manifest.root)).replace("\\", "/"),
+                "size": language_manifest.stat().st_size,
+                "sha256": _sha256(language_manifest),
+                "reason": (
+                    "AES-encrypted JSON used by the client; language extraction uses the "
+                    "catalog resource-set manifest instead"
+                ),
+            }
+        )
 
     for relative in (Path("config/DBCfg/DirtyWords.db"), Path("config/XFileZip/210201614.bin")):
         path = manifest.root / relative
