@@ -137,6 +137,20 @@ normal pipeline; it does not need the much larger `Packages/b_*.zip` image and
 voice aggregates. Incremental Get runs reuse the ordinary download cache and
 regenerate a full resource-set manifest after normalization.
 
+Solver extraction is incremental by default when the output directory already
+contains its marker and catalog. Lua configuration rows whose source SHA-256 is
+unchanged are reused in place; changed and retired tables are removed before
+replacement. The language database compares resource-set package fingerprints
+and reuses all text rows when only the game version metadata changed. Use
+`--no-incremental` for a deliberate full rebuild, or `--clean` to recreate the
+entire output directory.
+
+Config-name recovery scans only Get packages marked as rebuilt. Logic-script
+facts are cached by bytecode SHA-256, including dependencies, config/RPC
+references and exported source paths. Artifact hardlinks retain their stored
+hashes, and the large MessagePack/X3 tree is reused as a unit whenever Get's
+per-package table fingerprints are unchanged.
+
 ## Compact runtime SQLite
 
 The full database also contains Lua indexes, artifact inventory, and decoded

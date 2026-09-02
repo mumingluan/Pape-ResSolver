@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip independent languages.sqlite generation",
     )
+    extract.add_argument(
+        "--no-incremental",
+        action="store_true",
+        help="rebuild every Solver table even when the previous output hashes match",
+    )
     query = commands.add_parser("query", help="query one named config row")
     query.add_argument("output", type=Path, help="output directory or resources.sqlite")
     query.add_argument("table", help="normalized table name")
@@ -72,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             export_scripts=args.export_scripts,
             materialize_tables=args.materialize_tables,
             extract_multilanguage=not args.no_multilanguage,
+            incremental=not args.no_incremental,
         )
         print(json.dumps(result["totals"], ensure_ascii=False, indent=2))
         return 0 if result["totals"]["failed"] == 0 else 2

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import process_artifacts
-from .config_recovery import recover_config_names
+from .config_recovery import apply_config_name_resolutions, recover_config_names
 from .lua_index import index_lua_sources
 from .lua_runtime import Lua53ConfigRuntime
 from .lua_static import parse_static_lua
@@ -40,6 +40,7 @@ class ExtractionPipeline:
         export_scripts: str = "useful",
         materialize_tables: str = "hardlink",
         extract_multilanguage: bool = True,
+        incremental: bool = True,
     ) -> dict[str, Any]:
         if clean and self.output.exists():
             marker = self.output / ".pape-res-output"
@@ -51,16 +52,100 @@ class ExtractionPipeline:
         self.schemas_dir.mkdir(parents=True, exist_ok=True)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         (self.output / ".pape-res-output").write_text("pape-res-solver-output-v1\n", encoding="ascii")
-        name_resolution_report = recover_config_names(self.manifest, self.runtime)
+        previous_catalog_path = self.output / "catalog.json"
+        previous_catalog = (
+            json.loads(previous_catalog_path.read_text(encoding="utf-8"))
+            if incremental and not clean and selected is None and previous_catalog_path.is_file()
+            else {}
+        )
+        previous_name_path = self.reports_dir / "config_name_resolution.json"
+        previous_name_report = (
+            json.loads(previous_name_path.read_text(encoding="utf-8"))
+            if incremental and not clean and previous_name_path.is_file()
+            else None
+        )
+        package_rows = self.manifest.data.get("packages", [])
+        has_incremental_package_state = bool(package_rows) and all(
+            row.get("incremental_status") in {"rebuilt", "reused"} for row in package_rows
+        )
+        rebuilt_package_ids = {
+            int(row["package_id"])
+            for row in package_rows
+            if row.get("incremental_status") == "rebuilt"
+        }
+        if previous_name_report and has_incremental_package_state:
+            seeded_records = apply_config_name_resolutions(self.manifest, previous_name_report)
+            if rebuilt_package_ids:
+                delta_name_report = recover_config_names(
+                    self.manifest, self.runtime, scan_package_ids=rebuilt_package_ids
+                )
+                merged = {
+                    (int(record["package_id"]), int(record["index"])): record
+                    for record in seeded_records
+                }
+                merged.update(
+                    {
+                        (int(record["package_id"]), int(record["index"])): record
+                        for record in delta_name_report.get("resolutions", [])
+                    }
+                )
+                name_resolution_report = {
+                    **delta_name_report,
+                    "resolutions": sorted(
+                        merged.values(), key=lambda record: str(record["table"])
+                    ),
+                    "incremental_status": "updated",
+                    "scanned_packages": sorted(rebuilt_package_ids),
+                    "seeded_resolutions": len(seeded_records),
+                }
+                resolved_tables = {
+                    str(record["table"])
+                    for record in name_resolution_report["resolutions"]
+                }
+                name_resolution_report["unresolved_referenced_tables"] = sorted(
+                    (
+                        set(previous_name_report.get("unresolved_referenced_tables", []))
+                        | set(delta_name_report.get("unresolved_referenced_tables", []))
+                    )
+                    - resolved_tables
+                )
+            else:
+                name_resolution_report = {
+                    **previous_name_report,
+                    "incremental_status": "reused",
+                    "scanned_packages": [],
+                    "seeded_resolutions": len(seeded_records),
+                }
+        else:
+            name_resolution_report = recover_config_names(self.manifest, self.runtime)
+            name_resolution_report["incremental_status"] = "rebuilt"
         entries = self.manifest.config_entries(selected)
-        catalog: list[dict[str, Any]] = []
+        previous_items = {
+            (int(item["package_id"]), int(item["index"])): item
+            for item in previous_catalog.get("tables", [])
+            if item.get("parser_mode") != "x3-msgpack-decoded"
+        }
+        reusable: dict[tuple[int, int], dict[str, Any]] = {}
+        for entry in entries:
+            key = (entry.package_id, entry.index)
+            old = previous_items.get(key)
+            if old and old.get("sha256") == entry.sha256 and self._catalog_item_files_exist(old):
+                reusable[key] = {**old, "incremental_status": "reused"}
+        catalog: list[dict[str, Any]] = list(reusable.values())
         failures: list[dict[str, Any]] = []
         unresolved: list[dict[str, Any]] = []
         database = self._open_database()
         try:
+            current_keys = {(entry.package_id, entry.index) for entry in entries}
+            for key, item in previous_items.items():
+                if key not in reusable and (selected is None or key in current_keys):
+                    self._remove_table(item, database)
             for entry in entries:
+                if (entry.package_id, entry.index) in reusable:
+                    continue
                 try:
                     item = self._extract_entry(entry, database)
+                    item["incremental_status"] = "rebuilt"
                     catalog.append(item)
                     if item["unresolved_values"]:
                         unresolved.append(
@@ -82,21 +167,44 @@ class ExtractionPipeline:
                         }
                     )
             lua_index_report = (
-                index_lua_sources(self.manifest, self.output, database, export_scripts) if index_lua else None
+                index_lua_sources(
+                    self.manifest,
+                    self.output,
+                    database,
+                    export_scripts,
+                    incremental=incremental and not clean,
+                )
+                if index_lua
+                else None
             )
             artifact_report = process_artifacts(
                 self.manifest,
                 self.output,
                 database,
                 materialize_mode=materialize_tables,
+                incremental=incremental and not clean,
             )
             catalog.extend(artifact_report.get("consolidated", {}).get("runtime_tables", []))
+            catalog.sort(key=lambda item: (str(item["table"]), int(item["package_id"]), int(item["index"])))
+            unresolved = [
+                {
+                    "table": item["table"],
+                    "source_path": item["source_path"],
+                    "count": item["unresolved_values"],
+                }
+                for item in catalog
+                if item["unresolved_values"]
+            ]
             reference_report = validate_references(database)
             database.commit()
         finally:
             database.close()
         language_report = (
-            export_multilanguage_sqlite(self.manifest.root, self.output / "languages.sqlite")
+            export_multilanguage_sqlite(
+                self.manifest.root,
+                self.output / "languages.sqlite",
+                incremental=incremental and not clean,
+            )
             if extract_multilanguage
             else {"available": False, "reason": "disabled by command line"}
         )
@@ -116,6 +224,11 @@ class ExtractionPipeline:
             },
             "tables": catalog,
             "multilanguage": language_report,
+            "incremental": {
+                "enabled": bool(incremental and not clean and selected is None),
+                "rebuilt_tables": len(entries) - len(reusable),
+                "reused_tables": len(reusable),
+            },
         }
         self._write_json(self.output / "catalog.json", catalog_document)
         self._write_json(self.reports_dir / "parse_failures.json", failures)
@@ -127,6 +240,22 @@ class ExtractionPipeline:
         self._write_json(self.reports_dir / "artifacts.json", artifact_report)
         self._write_json(self.reports_dir / "multilanguage.json", language_report)
         return catalog_document
+
+    def _catalog_item_files_exist(self, item: dict[str, Any]) -> bool:
+        jsonl_path = item.get("jsonl_path")
+        if not jsonl_path or not (self.output / str(jsonl_path)).is_file():
+            return False
+        schema_path = item.get("schema_path")
+        return not schema_path or (self.output / str(schema_path)).is_file()
+
+    def _remove_table(self, item: dict[str, Any], database: sqlite3.Connection) -> None:
+        table = str(item["table"])
+        database.execute("delete from config_rows where table_name = ?", (table,))
+        database.execute("delete from config_tables where table_name = ?", (table,))
+        for key in ("jsonl_path", "schema_path"):
+            relative = item.get(key)
+            if relative:
+                (self.output / str(relative)).unlink(missing_ok=True)
 
     def _extract_entry(self, entry: LuaSourceEntry, database: sqlite3.Connection) -> dict[str, Any]:
         source_path = self.manifest.resolve(entry.source_path)

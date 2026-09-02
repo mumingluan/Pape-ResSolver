@@ -38,6 +38,11 @@ def _materialize(source: Path, destination: Path, mode: str) -> str | None:
         return None
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
+        try:
+            if os.path.samefile(source, destination):
+                return str(destination)
+        except OSError:
+            pass
         destination.unlink()
     if mode == "hardlink":
         try:
@@ -75,17 +80,62 @@ def _format(path: Path) -> str:
     return path.suffix.lower().lstrip(".") or "unknown"
 
 
+def _table_content_fingerprint(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    packages = []
+    for row in document.get("packages", []):
+        fingerprint = row.get("fingerprint")
+        if not fingerprint:
+            return None
+        packages.append((int(row["package_id"]), str(fingerprint)))
+    encoded = json.dumps(sorted(packages), separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def process_artifacts(
     manifest: ResourceManifest,
     output: Path,
     database: sqlite3.Connection,
     materialize_mode: str = "hardlink",
+    incremental: bool = True,
 ) -> dict[str, Any]:
-    database.execute("delete from resource_files")
+    current_tables_manifest = manifest.root / "tables" / "manifest.json"
+    previous_tables_manifest = output / "artifacts" / "tables" / "manifest.json"
+    table_fingerprint = _table_content_fingerprint(current_tables_manifest)
+    reuse_tables = bool(
+        incremental
+        and table_fingerprint
+        and table_fingerprint == _table_content_fingerprint(previous_tables_manifest)
+    )
+    previous_files = {
+        str(row[0]): {
+            "size": int(row[1]),
+            "sha256": row[2],
+            "records": row[3],
+            "output_path": row[4],
+            "materialized": bool(row[5]),
+        }
+        for row in database.execute(
+            "select source_path, size, sha256, records, output_path, materialized from resource_files"
+        )
+    } if incremental else {}
+    if reuse_tables:
+        database.execute("delete from resource_files where category not like 'tables/%'")
+        database.execute("delete from resource_files where category = 'tables/manifest'")
+    else:
+        database.execute("delete from resource_files")
     database.execute("delete from resource_packages")
-    database.execute("delete from decoded_table_rows")
-    database.execute("delete from config_rows where table_name in (select table_name from config_tables where source_name like 'X3MsgPack.%')")
-    database.execute("delete from config_tables where source_name like 'X3MsgPack.%'")
+    if reuse_tables:
+        database.execute("delete from decoded_table_rows where package_id < 0")
+    else:
+        database.execute("delete from decoded_table_rows")
+        database.execute("delete from config_rows where table_name in (select table_name from config_tables where source_name like 'X3MsgPack.%')")
+        database.execute("delete from config_tables where source_name like 'X3MsgPack.%'")
     artifacts_root = output / "artifacts"
     counts: dict[str, dict[str, int]] = {}
     total_files = 0
@@ -97,10 +147,29 @@ def process_artifacts(
     ) -> None:
         nonlocal total_files, total_bytes, materialized_files
         stat = source.stat()
-        digest = _sha256(source) if hash_file else None
-        records = _jsonl_records(source) if source.name.lower().endswith(".jsonl") else None
+        source_relative = str(source.relative_to(manifest.root)).replace("\\", "/")
         destination = artifacts_root / relative
-        materialized = _materialize(source, destination, materialize_mode) if materialize else None
+        previous = previous_files.get(source_relative)
+        same_materialized_file = False
+        if (
+            materialize
+            and previous
+            and previous["materialized"]
+            and previous["size"] == stat.st_size
+            and destination.is_file()
+        ):
+            try:
+                same_materialized_file = os.path.samefile(source, destination)
+            except OSError:
+                pass
+        if same_materialized_file:
+            digest = previous["sha256"] if hash_file else None
+            records = previous["records"]
+            materialized = str(destination)
+        else:
+            digest = _sha256(source) if hash_file else None
+            records = _jsonl_records(source) if source.name.lower().endswith(".jsonl") else None
+            materialized = _materialize(source, destination, materialize_mode) if materialize else None
         if materialized:
             materialized_files += 1
         database.execute(
@@ -110,7 +179,7 @@ def process_artifacts(
             ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 category,
-                str(source.relative_to(manifest.root)).replace("\\", "/"),
+                source_relative,
                 str(destination.relative_to(output)).replace("\\", "/") if materialized else None,
                 _package_id(relative),
                 _entry_id(relative),
@@ -129,11 +198,18 @@ def process_artifacts(
         total_bytes += stat.st_size
 
     tables_root = manifest.root / "tables"
-    if tables_root.is_dir():
+    if tables_root.is_dir() and not reuse_tables:
         for source in sorted(path for path in tables_root.rglob("*") if path.is_file()):
             relative = source.relative_to(tables_root)
             category = "tables/" + (relative.parts[0] if len(relative.parts) > 1 else "manifest")
             add_file(source, Path("tables") / relative, category, materialize=True)
+    elif current_tables_manifest.is_file():
+        add_file(
+            current_tables_manifest,
+            Path("tables/manifest.json"),
+            "tables/manifest",
+            materialize=True,
+        )
 
     for source in sorted(path for path in (manifest.root / "config").rglob("*") if path.is_file()):
         add_file(
@@ -176,12 +252,32 @@ def process_artifacts(
             )
         add_file(root_manifest, Path("manifest.json"), "root_manifest", materialize=True)
 
-    consolidated = _consolidate_decoded_tables(manifest, output, database)
+    if reuse_tables and (output / "server_tables" / "catalog.json").is_file():
+        consolidated = json.loads(
+            (output / "server_tables" / "catalog.json").read_text(encoding="utf-8")
+        )
+    else:
+        consolidated = _consolidate_decoded_tables(manifest, output, database)
     config_outputs = _normalize_config_artifacts(manifest, output, database)
+
+    counts = {
+        str(category): {"files": int(files), "bytes": int(size), "records": int(records)}
+        for category, files, size, records in database.execute(
+            """select category, count(*), coalesce(sum(size), 0), coalesce(sum(records), 0)
+               from resource_files group by category"""
+        )
+    }
+    total_files, total_bytes, materialized_files = database.execute(
+        "select count(*), coalesce(sum(size), 0), coalesce(sum(materialized), 0) from resource_files"
+    ).fetchone()
 
     return {
         "schema": "pape-res-artifact-report-v1",
         "materialize_mode": materialize_mode,
+        "incremental": {
+            "table_fingerprint": table_fingerprint,
+            "reused_tables": reuse_tables,
+        },
         "totals": {
             "files": total_files,
             "bytes": total_bytes,

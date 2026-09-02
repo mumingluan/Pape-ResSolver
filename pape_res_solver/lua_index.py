@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -101,11 +102,41 @@ def index_lua_sources(
     output: Path,
     database: sqlite3.Connection,
     export_mode: str = "useful",
+    incremental: bool = True,
 ) -> dict[str, object]:
-    database.execute("delete from lua_dependencies")
-    database.execute("delete from lua_scripts")
     catalog_path = output / "scripts" / "catalog.jsonl"
     catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    entries = list(manifest.all_entries())
+    identity = [
+        (entry.package_id, entry.index, entry.sha256, entry.source_name, entry.resolved)
+        for entry in entries
+    ]
+    input_fingerprint = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    previous_report_path = output / "reports" / "lua_index.json"
+    if incremental and previous_report_path.is_file() and catalog_path.is_file():
+        previous_report = json.loads(previous_report_path.read_text(encoding="utf-8"))
+        if (
+            previous_report.get("input_fingerprint") == input_fingerprint
+            and previous_report.get("export_mode") == export_mode
+            and database.execute("select count(*) from lua_scripts").fetchone()[0]
+            == previous_report.get("totals", {}).get("logic_entries")
+        ):
+            return {**previous_report, "incremental_status": "reused"}
+    database.execute("delete from lua_dependencies")
+    database.execute("delete from lua_scripts")
+    previous_records: dict[tuple[int, int], dict[str, object]] = {}
+    previous_exported_paths: set[str] = set()
+    if incremental and catalog_path.is_file():
+        for line in catalog_path.read_text(encoding="utf-8").splitlines():
+            if not line:
+                continue
+            record = json.loads(line)
+            key = (int(record["package_id"]), int(record["index"]))
+            previous_records[key] = record
+            if record.get("exported_path"):
+                previous_exported_paths.add(str(record["exported_path"]))
     totals = {
         "all_entries": 0,
         "resolved_entries": 0,
@@ -117,10 +148,14 @@ def index_lua_sources(
         "config_references": 0,
         "rpc_references": 0,
         "functions": 0,
+        "missing_sources": 0,
+        "rebuilt_scripts": 0,
+        "reused_scripts": 0,
     }
     copied_hashes: dict[Path, str] = {}
+    current_exported_paths: set[str] = set()
     with catalog_path.open("w", encoding="utf-8", newline="\n") as catalog:
-        for entry in manifest.all_entries():
+        for entry in entries:
             totals["all_entries"] += 1
             totals["resolved_entries" if entry.resolved else "unresolved_entries"] += 1
             category = classify_source(entry.source_name)
@@ -129,25 +164,72 @@ def index_lua_sources(
                 continue
             totals["logic_entries"] += 1
             path = manifest.resolve(entry.source_path)
-            source = path.read_text(encoding="utf-8", errors="replace")
-            facts = inspect_script(source)
-            should_export = export_mode == "all" or (
-                export_mode == "useful" and is_useful_server_script(entry.source_name, facts)
-            )
-            exported_path: str | None = None
-            if should_export:
-                destination = _export_path(output, entry)
-                previous_hash = copied_hashes.get(destination)
-                if previous_hash is not None and previous_hash != entry.sha256:
-                    destination = destination.with_name(
-                        f"{destination.stem}__p{entry.package_id}_e{entry.index:06d}.lua"
+            previous = previous_records.get((entry.package_id, entry.index))
+            reusable = previous is not None and previous.get("sha256") == entry.sha256
+            if reusable:
+                facts = ScriptFacts(
+                    list(previous.get("dependencies", [])),
+                    list(previous.get("config_tables", [])),
+                    list(previous.get("rpc_names", [])),
+                    list(previous.get("functions", [])),
+                    list(previous.get("classes", [])),
+                )
+                source_missing = bool(previous.get("source_missing", False))
+                should_export = export_mode == "all" or (
+                    export_mode == "useful"
+                    and is_useful_server_script(entry.source_name, facts)
+                )
+                should_export = should_export and not source_missing
+                exported_path = None
+                if should_export:
+                    destination = _export_path(output, entry)
+                    previous_hash = copied_hashes.get(destination)
+                    if previous_hash is not None and previous_hash != entry.sha256:
+                        destination = destination.with_name(
+                            f"{destination.stem}__p{entry.package_id}_e{entry.index:06d}.lua"
+                        )
+                    old_destination = (
+                        output / str(previous["exported_path"])
+                        if previous.get("exported_path")
+                        else None
                     )
-                if destination not in copied_hashes:
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(path, destination)
+                    if old_destination != destination or not destination.is_file():
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(path, destination)
                     copied_hashes[destination] = entry.sha256
+                    exported_path = str(destination.relative_to(output)).replace("\\", "/")
+                    current_exported_paths.add(exported_path)
                     totals["exported_scripts"] += 1
-                exported_path = str(destination.relative_to(output)).replace("\\", "/")
+                totals["reused_scripts"] += 1
+            else:
+                source_missing = not path.is_file()
+                if source_missing:
+                    facts = ScriptFacts([], [], [], [], [])
+                else:
+                    source = path.read_text(encoding="utf-8", errors="replace")
+                    facts = inspect_script(source)
+                should_export = export_mode == "all" or (
+                    export_mode == "useful" and is_useful_server_script(entry.source_name, facts)
+                )
+                should_export = should_export and not source_missing
+                exported_path = None
+                if should_export:
+                    destination = _export_path(output, entry)
+                    previous_hash = copied_hashes.get(destination)
+                    if previous_hash is not None and previous_hash != entry.sha256:
+                        destination = destination.with_name(
+                            f"{destination.stem}__p{entry.package_id}_e{entry.index:06d}.lua"
+                        )
+                    if destination not in copied_hashes:
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(path, destination)
+                        copied_hashes[destination] = entry.sha256
+                        totals["exported_scripts"] += 1
+                    exported_path = str(destination.relative_to(output)).replace("\\", "/")
+                    current_exported_paths.add(exported_path)
+                totals["rebuilt_scripts"] += 1
+            if source_missing:
+                totals["missing_sources"] += 1
             record = {
                 "source_name": entry.source_name,
                 "resolved": entry.resolved,
@@ -159,6 +241,7 @@ def index_lua_sources(
                 "name_hash": entry.name_hash,
                 "size": entry.size,
                 "exported_path": exported_path,
+                "source_missing": source_missing,
                 "dependencies": facts.dependencies,
                 "config_tables": facts.config_tables,
                 "rpc_names": facts.rpc_names,
@@ -203,9 +286,13 @@ def index_lua_sources(
             totals["config_references"] += len(facts.config_tables)
             totals["rpc_references"] += len(facts.rpc_names)
             totals["functions"] += len(facts.functions)
+    for relative in previous_exported_paths - current_exported_paths:
+        (output / relative).unlink(missing_ok=True)
     return {
         "schema": "pape-res-lua-index-report-v1",
         "export_mode": export_mode,
+        "input_fingerprint": input_fingerprint,
+        "incremental_status": "updated",
         "totals": totals,
         "catalog": str(catalog_path.relative_to(output)).replace("\\", "/"),
     }

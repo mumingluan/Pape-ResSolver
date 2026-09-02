@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,6 +69,39 @@ class VersionedPipelineTests(unittest.TestCase):
             )
             row = json.loads((output / "tables" / "PortableExample.jsonl").read_text())
             self.assertEqual(row, {"ID": 77, "Name": "portable"})
+
+            repeated = ExtractionPipeline(root, output).extract(
+                selected=None,
+                index_lua=False,
+                materialize_tables="none",
+            )
+            self.assertEqual(repeated["incremental"]["reused_tables"], 1)
+            self.assertEqual(repeated["incremental"]["rebuilt_tables"], 0)
+
+            changed_source = "return {[88] = {88, 'changed'}, ['_k'] = {ID = 1, Name = 2}}"
+            (source_dir / "000007.lua").write_text(changed_source, encoding="utf-8")
+            changed_chunk = compiler(changed_source.encode("utf-8"))
+            changed_size_t4, _ = convert_lua53_size_t(changed_chunk, 4)
+            (bytecode_dir / "000007.luac").write_bytes(changed_size_t4)
+            manifest["sources"]["LuaCfg.PortableExample"][0]["sha256"] = "fixture-sha-next"
+            manifest["sources"]["LuaCfg.PortableExample"][0]["size"] = len(changed_size_t4)
+            (root / "lua_source/manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            changed = ExtractionPipeline(root, output).extract(
+                index_lua=False,
+                materialize_tables="none",
+            )
+            self.assertEqual(changed["incremental"]["rebuilt_tables"], 1)
+            self.assertEqual(changed["incremental"]["reused_tables"], 0)
+            database = sqlite3.connect(output / "resources.sqlite")
+            try:
+                keys = database.execute(
+                    "select row_key from config_rows where table_name = 'PortableExample'"
+                ).fetchall()
+                self.assertEqual(keys, [("88",)])
+            finally:
+                database.close()
 
 
 if __name__ == "__main__":

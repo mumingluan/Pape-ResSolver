@@ -138,6 +138,20 @@ class MultilanguageTests(unittest.TestCase):
             finally:
                 database.close()
 
+            manifest_path = root / "multilanguage/manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["version"] = "1.7.next"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            reused = export_multilanguage_sqlite(root, output)
+            self.assertEqual(reused["incremental_status"], "reused")
+            self.assertEqual(reused["counts"]["texts"], 2)
+            database = sqlite3.connect(output)
+            try:
+                metadata = dict(database.execute("select key, value from language_metadata"))
+                self.assertEqual(metadata["resource_version"], "1.7.next")
+            finally:
+                database.close()
+
 
 if __name__ == "__main__":
     unittest.main()

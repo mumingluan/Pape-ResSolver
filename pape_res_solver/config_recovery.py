@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import binascii
 import re
+import shutil
+import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .lua_index import inspect_script
@@ -28,6 +31,52 @@ _RETURN_CFG = re.compile(
     r"\s*\(\s*['\"]([^'\"]+)['\"]"
 )
 _GENERIC_FIELDS = {"ID", "Id", "Name", "Type", "Icon", "Order", "Group", "Desc"}
+
+
+def _candidate_source_keys(
+    manifest: ResourceManifest, entries: list[LuaSourceEntry]
+) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
+    rg = shutil.which("rg")
+    source_root = manifest.root / "lua_source" / "by_package"
+    package_roots = sorted(
+        {
+            source_root / str(entry.package_id)
+            for entry in entries
+            if (source_root / str(entry.package_id)).is_dir()
+        }
+    )
+    if not entries:
+        return set(), set()
+    if rg is None or not package_roots:
+        keys = {(entry.package_id, entry.index) for entry in entries}
+        return keys, keys
+    relative_to_key = {
+        entry.source_path.replace("\\", "/").lower(): (entry.package_id, entry.index)
+        for entry in entries
+    }
+
+    def search(pattern: str) -> set[tuple[int, int]]:
+        process = subprocess.run(
+            [rg, "-l", "--text", "--no-messages", "-e", pattern, *(str(path) for path in package_roots)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if process.returncode not in (0, 1):
+            keys = {(entry.package_id, entry.index) for entry in entries}
+            return keys
+        result = set()
+        for line in process.stdout.splitlines():
+            try:
+                relative = Path(line).resolve().relative_to(manifest.root).as_posix().lower()
+            except (OSError, ValueError):
+                continue
+            key = relative_to_key.get(relative)
+            if key is not None:
+                result.add(key)
+        return result
+
+    return search(r"LuaCfgMgr\."), search(r"(?:\._k|\[['\"]_k['\"]\]|\b_k)\s*=")
 
 
 def xlua_crc32(value: str) -> int:
@@ -111,8 +160,32 @@ def _shape(entry: LuaSourceEntry, manifest: ResourceManifest, runtime: Lua53Conf
     return ConfigShape(entry=entry, fields=frozenset(normalized.schema), rows=len(normalized.rows))
 
 
+def apply_config_name_resolutions(
+    manifest: ResourceManifest, report: dict[str, Any]
+) -> list[dict[str, Any]]:
+    current = {
+        (entry.package_id, entry.index): entry for entry in manifest.all_entries()
+    }
+    resolutions = {}
+    records = []
+    for record in report.get("resolutions", []):
+        key = (int(record["package_id"]), int(record["index"]))
+        entry = current.get(key)
+        if entry is None:
+            continue
+        expected_hash = record.get("name_hash")
+        if expected_hash is not None and entry.name_hash != int(expected_hash):
+            continue
+        resolutions[key] = str(record["source_name"])
+        records.append(record)
+    manifest.add_inferred_sources(resolutions)
+    return records
+
+
 def recover_config_names(
-    manifest: ResourceManifest, runtime: Lua53ConfigRuntime
+    manifest: ResourceManifest,
+    runtime: Lua53ConfigRuntime,
+    scan_package_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     """Resolve stripped LuaCfg names from runtime references and schema evidence.
 
@@ -122,15 +195,27 @@ def recover_config_names(
     """
     entries = list(manifest.all_entries())
     unresolved = [entry for entry in entries if not entry.resolved]
+    scan_entries = (
+        entries
+        if scan_package_ids is None
+        else [entry for entry in entries if entry.package_id in scan_package_ids]
+    )
+    logic_keys, shape_keys = _candidate_source_keys(manifest, scan_entries)
     source_text: dict[tuple[int, int], str] = {}
     logic_sources: list[str] = []
     for entry in entries:
+        key = (entry.package_id, entry.index)
+        if key not in logic_keys and key not in shape_keys:
+            continue
         path = manifest.resolve(entry.source_path)
         if not path.is_file():
             continue
         source = path.read_text(encoding="utf-8", errors="replace")
-        source_text[(entry.package_id, entry.index)] = source
+        if key in shape_keys:
+            source_text[key] = source
         if (
+            key in logic_keys
+            and
             "LuaCfgMgr." in source
             and not entry.source_name.startswith("LuaCfg.")
             and not _looks_like_config(source)

@@ -20,6 +20,75 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _content_fingerprint(manifest: dict[str, Any]) -> str:
+    resource_sets = []
+    for resource_set in manifest.get("resource_sets", []):
+        packages = []
+        for package in resource_set.get("packages", []):
+            packages.append(
+                {
+                    "package_id": int(package["package_id"]),
+                    "kind": package.get("kind"),
+                    "source_nx_sha256": package.get("source_nx_sha256"),
+                    "source_nxf_sha256": package.get("source_nxf_sha256"),
+                }
+            )
+        resource_sets.append(
+            {
+                "resource_set_id": int(resource_set["resource_set_id"]),
+                "packages": sorted(packages, key=lambda item: item["package_id"]),
+            }
+        )
+    encoded = json.dumps(
+        sorted(resource_sets, key=lambda item: item["resource_set_id"]),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _reuse_unchanged_database(
+    output: Path, manifest: dict[str, Any], manifest_path: Path, fingerprint: str
+) -> dict[str, Any] | None:
+    if not output.is_file():
+        return None
+    database = sqlite3.connect(output)
+    try:
+        metadata = dict(database.execute("select key, value from language_metadata"))
+        if metadata.get("content_fingerprint") != fingerprint:
+            return None
+        counts = {
+            "resource_sets": database.execute(
+                "select count(*) from language_resource_sets"
+            ).fetchone()[0],
+            "packages": database.execute("select count(*) from language_packages").fetchone()[0],
+            "texts": database.execute("select count(*) from localized_text").fetchone()[0],
+        }
+        database.executemany(
+            "insert or replace into language_metadata(key, value) values (?, ?)",
+            {
+                "resource_version": str(manifest.get("version") or ""),
+                "platform": str(manifest.get("platform") or ""),
+                "source_manifest_sha256": _sha256(manifest_path),
+                "generated_at": datetime.now(UTC).isoformat(),
+            }.items(),
+        )
+        database.commit()
+    except sqlite3.Error:
+        return None
+    finally:
+        database.close()
+    return {
+        "schema": LANGUAGE_SCHEMA,
+        "available": True,
+        "database": output.name,
+        "counts": counts,
+        "packages": [],
+        "incremental_status": "reused",
+        "content_fingerprint": fingerprint,
+    }
+
+
 def _fields(data: bytes) -> list[tuple[int, bytes]]:
     result: list[tuple[int, bytes]] = []
     position = 0
@@ -175,7 +244,9 @@ def _create_schema(database: sqlite3.Connection) -> None:
     )
 
 
-def export_multilanguage_sqlite(resource_root: Path, output: Path) -> dict[str, Any]:
+def export_multilanguage_sqlite(
+    resource_root: Path, output: Path, incremental: bool = True
+) -> dict[str, Any]:
     manifest_path = resource_root / "multilanguage" / "manifest.json"
     if not manifest_path.is_file():
         if output.is_file():
@@ -190,6 +261,15 @@ def export_multilanguage_sqlite(resource_root: Path, output: Path) -> dict[str, 
         raise ValueError(f"unsupported multilanguage manifest schema: {manifest.get('schema')}")
     if manifest.get("failures"):
         raise ValueError("Get multilanguage manifest contains missing normalized packages")
+
+    fingerprint = _content_fingerprint(manifest)
+    reused = (
+        _reuse_unchanged_database(output, manifest, manifest_path, fingerprint)
+        if incremental
+        else None
+    )
+    if reused is not None:
+        return reused
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + f".tmp.{os.getpid()}")
@@ -207,6 +287,7 @@ def export_multilanguage_sqlite(resource_root: Path, output: Path) -> dict[str, 
             "resource_version": str(manifest.get("version") or ""),
             "platform": str(manifest.get("platform") or ""),
             "source_manifest_sha256": _sha256(manifest_path),
+            "content_fingerprint": fingerprint,
             "generated_at": datetime.now(UTC).isoformat(),
         }
         database.executemany(
@@ -296,4 +377,6 @@ def export_multilanguage_sqlite(resource_root: Path, output: Path) -> dict[str, 
         "database": output.name,
         "counts": counts,
         "packages": package_reports,
+        "incremental_status": "rebuilt",
+        "content_fingerprint": fingerprint,
     }
