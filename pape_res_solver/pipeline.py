@@ -81,7 +81,6 @@ class ExtractionPipeline:
                             "error": f"{type(error).__name__}: {error}",
                         }
                     )
-            reference_report = validate_references(database)
             lua_index_report = (
                 index_lua_sources(self.manifest, self.output, database, export_scripts) if index_lua else None
             )
@@ -91,6 +90,8 @@ class ExtractionPipeline:
                 database,
                 materialize_mode=materialize_tables,
             )
+            catalog.extend(artifact_report.get("consolidated", {}).get("runtime_tables", []))
+            reference_report = validate_references(database)
             database.commit()
         finally:
             database.close()

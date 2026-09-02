@@ -87,7 +87,8 @@ APIs are exposed to resource chunks.
 `resources.sqlite` contains stable generic tables suitable for a Go or Python
 game server:
 
-- `config_tables` and `config_rows`: named `LuaCfg` tables and JSON rows;
+- `config_tables` and `config_rows`: named `LuaCfg` tables plus decoded X3
+  runtime tables and their JSON rows;
 - `config_references`: validated Card/Item/Gacha relationships;
 - `lua_scripts` and `lua_dependencies`: source, require, config and RPC index;
 - `resource_packages` and `resource_files`: normalized resource inventory;
@@ -162,6 +163,10 @@ python -m pape_res_solver trim resources.sqlite booi-res.sqlite `
 The compact database contains `resource_metadata`, `config_tables`,
 `config_rows`, and validated `config_references`. Tables use `WITHOUT ROWID`
 where appropriate. Analysis-only indexes and decoded artifacts are omitted.
+Decoded X3 record containers are promoted with stable `X3<TableName>` names
+(for example `X3WeaponLogicConfigs`, `X3WeaponSkinConfigs`, and
+`X3ActorCfgs`), so semantic battle configuration survives trimming without
+shipping raw MessagePack packages.
 The output is built into a temporary file, integrity checked, and atomically
 renamed. Existing outputs are preserved unless `--force` is passed.
 

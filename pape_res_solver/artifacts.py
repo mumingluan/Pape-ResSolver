@@ -84,6 +84,8 @@ def process_artifacts(
     database.execute("delete from resource_files")
     database.execute("delete from resource_packages")
     database.execute("delete from decoded_table_rows")
+    database.execute("delete from config_rows where table_name in (select table_name from config_tables where source_name like 'X3MsgPack.%')")
+    database.execute("delete from config_tables where source_name like 'X3MsgPack.%'")
     artifacts_root = output / "artifacts"
     counts: dict[str, dict[str, int]] = {}
     total_files = 0
@@ -204,6 +206,7 @@ def _consolidate_decoded_tables(
     packages = 0
     msgpack_rows = 0
     x3_rows = 0
+    runtime_tables: list[dict[str, Any]] = []
     parse_failures: list[dict[str, str]] = []
 
     msgpack_root = source_root / "msgpack"
@@ -279,6 +282,18 @@ def _consolidate_decoded_tables(
                     str(source.relative_to(manifest.root)).replace("\\", "/"),
                 ),
             )
+            promoted = _promote_x3_runtime_table(
+                source=source,
+                source_relative=source.relative_to(manifest.root),
+                value=value,
+                output=output,
+                database=database,
+                package_id=package_id,
+                entry_index=int(entry_key) if str(entry_key).isdigit() else 0,
+                table_name=table_name,
+            )
+            if promoted is not None:
+                runtime_tables.append(promoted)
             x3_rows += 1
 
     report_path = destination_root / "catalog.json"
@@ -287,11 +302,98 @@ def _consolidate_decoded_tables(
         "msgpack_packages": packages,
         "msgpack_rows": msgpack_rows,
         "x3_rows": x3_rows,
+        "runtime_tables": runtime_tables,
         "parse_failures": parse_failures,
     }
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
+
+
+def _promote_x3_runtime_table(
+    *,
+    source: Path,
+    source_relative: Path,
+    value: Any,
+    output: Path,
+    database: sqlite3.Connection,
+    package_id: int | None,
+    entry_index: int,
+    table_name: str,
+) -> dict[str, Any] | None:
+    """Expose decoded X3 records through the same runtime API as Lua configs.
+
+    X3 files contain client battle configuration that is semantic server data,
+    not an opaque artifact.  Keeping it in config_rows also means sqlite-trim
+    preserves it without carrying the raw package or analysis indexes.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    decoded = value.get("decoded")
+    if not isinstance(decoded, dict):
+        return None
+    records = decoded.get("records")
+    if not isinstance(records, dict) or not records:
+        return None
+
+    runtime_name = f"X3{table_name}"
+    rows: list[tuple[str, Any]] = []
+    for key, row in records.items():
+        if not isinstance(row, (dict, list)):
+            continue
+        rows.append((str(key), row))
+    if not rows:
+        return None
+    rows.sort(key=lambda item: item[0])
+
+    table_path = output / "tables" / f"{runtime_name}.jsonl"
+    table_path.parent.mkdir(parents=True, exist_ok=True)
+    with table_path.open("w", encoding="utf-8", newline="\n") as output_file:
+        for row_key, row in rows:
+            compact = json.dumps(row, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            output_file.write(compact + "\n")
+            database.execute(
+                "insert or replace into config_rows(table_name, row_key, data_json) values (?, ?, ?)",
+                (runtime_name, row_key, compact),
+            )
+
+    digest = _sha256(source)
+    relative_text = str(source_relative).replace("\\", "/")
+    record_type = str(decoded.get("record_type") or table_name)
+    source_name = f"X3MsgPack.{record_type}"
+    database.execute(
+        """insert or replace into config_tables(
+            table_name, source_name, package_id, entry_index, source_path,
+            sha256, row_count, schema_fingerprint, unresolved_values
+        ) values (?, ?, ?, ?, ?, ?, ?, null, 0)""",
+        (
+            runtime_name,
+            source_name,
+            package_id if package_id is not None else -1,
+            entry_index,
+            relative_text,
+            digest,
+            len(rows),
+        ),
+    )
+    return {
+        "table": runtime_name,
+        "source_name": source_name,
+        "package_id": package_id if package_id is not None else -1,
+        "index": entry_index,
+        "source_path": relative_text,
+        "sha256": digest,
+        "size": source.stat().st_size,
+        "name_hash": None,
+        "row_count": len(rows),
+        "schema_fingerprint": None,
+        "schema_path": None,
+        "jsonl_path": str(table_path.relative_to(output)).replace("\\", "/"),
+        "unresolved_values": 0,
+        "parser_mode": "x3-msgpack-decoded",
+        "bytecode_header": None,
+    }
 
 
 def _normalize_config_artifacts(
