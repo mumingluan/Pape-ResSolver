@@ -19,6 +19,19 @@ class SQLiteTrimTests(unittest.TestCase):
         self.assertEqual(runtime_tables("booi", ["Extra"])[-1], "X3WeaponSkinConfigs")
         self.assertIn("Extra", runtime_tables("booi", ["Extra"]))
 
+    def test_luacfg_reverse_scan_recovered_names_are_whitelisted(self) -> None:
+        recovered = {
+            "ASMRInfo", "AchievementType", "ActivityReward", "ActivityTechTree",
+            "CircleChess", "Dialogue", "DialogueVoiceRecognition", "EasterEgg",
+            "GMCompose_DEBUG", "GMList_DEBUG", "GM_DEBUG", "GachaRuleText",
+            "GoogleTaskString", "HomeTemplate.HomeTemplate_", "PayInfo", "PhoneMoment",
+            "PhotoCode", "PopRunMap.", "PopRunMap.Pre.", "PopRunNoteGroup.",
+            "RadioInfo", "RoleDelectionTxt", "Rule", "SCoreStoryInfo",
+            "StorySeriesContent", "SystemURLList",
+        }
+        self.assertEqual(len(recovered), 26)
+        self.assertTrue(recovered.issubset(BOOI_RUNTIME_TABLES))
+
     def test_trims_analysis_tables_and_preserves_config_queries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

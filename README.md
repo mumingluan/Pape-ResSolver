@@ -138,6 +138,8 @@ python -m pape_res_solver patch-app-key `
 
 ## LuaCfg 表名恢复
 
+支持 `_k` 通过中间变量赋值的反编译结果。对 `_useBinary` 主表，按客户端 CfgHelper 的 `LuaCfg.LuaSplitFils.{table}.cfg_{table}_{key}` 规则查找片段并按主表 schema 合并；缺片、哈希冲突和 ID 不一致会报告提取失败。目录记录片段数量及依赖指纹，分片变化会使主表增量缓存失效。
+
 Solver 会从 Lua 的 `LuaCfgMgr` 调用点提取正式注册名，并使用精确的 XLua CRC，或游戏字段访问与配置 schema 的唯一互证，恢复被裁剪或热修表的名称。
 
 无法形成唯一证据的候选会保留为未解析项，写入 `reports/config_name_resolution.json`，不会生成 `Recovered.*` 猜测表。

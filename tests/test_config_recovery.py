@@ -17,6 +17,14 @@ def _crc(value: str) -> int:
 
 
 class ConfigNameRecoveryTests(unittest.TestCase):
+    def test_register_style_schema_alias(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = 'local t={[7]={7,1,2}}; local k="_k"; t[k]={ID=1,EffectCDType=2,TriggerCount=3}; return t'
+            logic = 'local c=LuaCfgMgr.Get("EasterEgg",7); return c.EffectCDType,c.TriggerCount'
+            manifest = self._fixture(Path(temporary), [(1,config,123),(2,logic,456)])
+            report = recover_config_names(manifest,Lua53ConfigRuntime())
+            self.assertEqual(report['resolutions'][0]['table'],'EasterEgg')
+
     def _fixture(self, root: Path, chunks: list[tuple[int, str, int]]) -> ResourceManifest:
         source_dir = root / "lua_source" / "by_package" / "7"
         bytecode_dir = root / "lua" / "7"

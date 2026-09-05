@@ -130,6 +130,8 @@ class ResourceManifest:
     def config_entries(self, selected: set[str] | None = None) -> list[LuaSourceEntry]:
         entries: list[LuaSourceEntry] = []
         for entry in self.source_entries("LuaCfg."):
+            if entry.source_name.startswith("LuaCfg.LuaSplitFils."):
+                continue
             if selected and entry.table_name not in selected and entry.source_name not in selected:
                 continue
             entries.append(entry)

@@ -17,6 +17,7 @@ from .manifest import LuaSourceEntry, ResourceManifest
 from .multilanguage import export_multilanguage_sqlite
 from .normalize import normalize_config_table, safe_table_filename
 from .validate import validate_references
+from .split_tables import SplitTableResolver
 
 
 def _json_line(value: Any) -> str:
@@ -31,6 +32,7 @@ class ExtractionPipeline:
         self.schemas_dir = self.output / "schemas"
         self.reports_dir = self.output / "reports"
         self.runtime = Lua53ConfigRuntime()
+        self.split_tables = SplitTableResolver(self.manifest, self.runtime)
 
     def extract(
         self,
@@ -129,7 +131,8 @@ class ExtractionPipeline:
         for entry in entries:
             key = (entry.package_id, entry.index)
             old = previous_items.get(key)
-            if old and old.get("sha256") == entry.sha256 and self._catalog_item_files_exist(old):
+            split_current = old and (old.get("split_tables") or {}).get("dependency_fingerprint") == self.split_tables.fingerprint
+            if old and old.get("sha256") == entry.sha256 and self._catalog_item_files_exist(old) and old.get("split_resolver_version") == 1 and (not old.get("split_tables") or split_current):
                 reusable[key] = {**old, "incremental_status": "reused"}
         catalog: list[dict[str, Any]] = list(reusable.values())
         failures: list[dict[str, Any]] = []
@@ -270,6 +273,7 @@ class ExtractionPipeline:
             source = source_path.read_text(encoding="utf-8")
             parsed = parse_static_lua(source, str(source_path))
             bytecode_header = {"fallback_reason": f"{type(bytecode_error).__name__}: {bytecode_error}"}
+        split_report = self.split_tables.restore(entry.table_name, parsed)
         normalized = normalize_config_table(parsed)
         filename = safe_table_filename(entry.table_name)
         table_path = self.tables_dir / f"{filename}.jsonl"
@@ -302,6 +306,8 @@ class ExtractionPipeline:
             "unresolved_values": normalized.unresolved_values,
             "parser_mode": parser_mode,
             "bytecode_header": bytecode_header,
+            "split_resolver_version": 1,
+            "split_tables": split_report,
         }
         database.execute(
             """insert or replace into config_tables(

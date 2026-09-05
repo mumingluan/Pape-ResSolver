@@ -145,7 +145,7 @@ def normalize_config_table(value: Any) -> NormalizedTable:
         canonical = json.dumps(schema_json, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     rows: list[tuple[str, dict[str, Any] | Any]] = []
-    for key in _sorted_keys(key for key in value.values if key != "_k"):
+    for key in _sorted_keys(key for key in value.values if key not in ("_k", "_useBinary")):
         row = value.get(key)
         normalized = (
             # Some LuaCfg tables group multiple schema-shaped rows under one

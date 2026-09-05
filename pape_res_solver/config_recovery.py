@@ -13,6 +13,7 @@ from .lua_index import inspect_script
 from .lua_runtime import Lua53ConfigRuntime
 from .manifest import LuaSourceEntry, ResourceManifest
 from .normalize import normalize_config_table
+from .runtime_presets import BOOI_RUNTIME_TABLES
 
 _FUNCTION_START = re.compile(r"(?m)^\s*function\s+([A-Za-z_][A-Za-z0-9_.:]*)")
 _CFG_CALL = re.compile(
@@ -76,7 +77,7 @@ def _candidate_source_keys(
                 result.add(key)
         return result
 
-    return search(r"LuaCfgMgr\."), search(r"(?:\._k|\[['\"]_k['\"]\]|\b_k)\s*=")
+    return search(r"LuaCfgMgr\."), search(r"(?:\._k|\[['\"]_k['\"]\]|\b_k)\s*=|=\s*['\"]_k['\"]")
 
 
 def xlua_crc32(value: str) -> int:
@@ -144,7 +145,7 @@ def _collect_usage(sources: list[str]) -> tuple[set[str], dict[str, set[str]]]:
 def _looks_like_config(source: str) -> bool:
     tail = source[-4096:]
     has_schema = bool(
-        re.search(r"(?:\._k|\[['\"]_k['\"]\]|\b_k)\s*=", tail)
+        re.search(r"(?:\._k|\[['\"]_k['\"]\]|\b_k)\s*=|=\s*['\"]_k['\"]", tail)
     )
     return bool(has_schema and re.search(r"\breturn\s+", tail))
 
@@ -309,6 +310,9 @@ def recover_config_names(
         "resolved": len(records),
         "resolutions": sorted(records, key=lambda record: str(record["table"])),
         "unresolved_referenced_tables": sorted(
-            referenced - existing_tables - {str(record["table"]) for record in records}
+            referenced
+            - existing_tables
+            - {str(record["table"]) for record in records}
+            - BOOI_RUNTIME_TABLES
         ),
     }
