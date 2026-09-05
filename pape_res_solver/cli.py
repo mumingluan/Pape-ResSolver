@@ -4,9 +4,12 @@ import argparse
 import json
 import sqlite3
 import sys
+import zipfile
 from pathlib import Path
 
+from .client_patch import auto_patch_xfilezip_app_key, patch_xfilezip_app_key
 from .pipeline import ExtractionPipeline
+from .runtime_presets import RUNTIME_PRESETS, runtime_tables
 from .sqlite_trim import trim_sqlite
 from .verify import verify_output
 
@@ -60,9 +63,34 @@ def build_parser() -> argparse.ArgumentParser:
     trim.add_argument("input", type=Path, help="full resources.sqlite")
     trim.add_argument("output", type=Path, help="compact output SQLite")
     trim.add_argument("--table", action="append", default=[], help="config table to retain; repeatable")
+    trim.add_argument(
+        "--preset",
+        choices=tuple(sorted(RUNTIME_PRESETS)),
+        help="retain the reviewed table set for a supported runtime; --table adds extra tables",
+    )
     trim.add_argument("--resource-version", help="resource/hotfix version stored in output metadata")
     trim.add_argument("--no-references", action="store_true", help="omit validated config references")
     trim.add_argument("--force", action="store_true", help="atomically replace an existing output")
+    patch_app_key = commands.add_parser(
+        "patch-app-key", help="generate a client-compatible XFileZip AppKey patch"
+    )
+    patch_app_key.add_argument(
+        "input", type=Path, help="source ZIP, XFileZip directory, or resource root"
+    )
+    patch_app_key.add_argument(
+        "output",
+        type=Path,
+        help="output ZIP for file input, or output directory for directory input",
+    )
+    patch_app_key.add_argument("--old-app-key", required=True, help="AppKey currently embedded in Lua")
+    patch_app_key.add_argument("--new-app-key", required=True, help="replacement AppKey of equal length")
+    patch_app_key.add_argument(
+        "--nx-output", type=Path, help="also write the patched runtime NX cache file"
+    )
+    patch_app_key.add_argument(
+        "--expected-matches", type=int, default=1, help="required exact match count (default: 1)"
+    )
+    patch_app_key.add_argument("--force", action="store_true", help="atomically replace outputs")
     return parser
 
 
@@ -142,13 +170,41 @@ def main(argv: list[str] | None = None) -> int:
             report = trim_sqlite(
                 args.input,
                 args.output,
-                tables=args.table,
+                tables=runtime_tables(args.preset, args.table),
                 resource_version=args.resource_version,
                 include_references=not args.no_references,
                 force=args.force,
             )
         except (FileExistsError, OSError, RuntimeError, ValueError, sqlite3.Error) as error:
             print(f"trim failed: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "patch-app-key":
+        try:
+            if args.input.is_dir():
+                if args.nx_output is not None:
+                    raise ValueError("--nx-output is automatic when input is a directory")
+                report = auto_patch_xfilezip_app_key(
+                    args.input,
+                    args.output,
+                    args.old_app_key,
+                    args.new_app_key,
+                    expected_matches=args.expected_matches,
+                    force=args.force,
+                )
+            else:
+                report = patch_xfilezip_app_key(
+                    args.input,
+                    args.output,
+                    args.old_app_key,
+                    args.new_app_key,
+                    nx_output=args.nx_output,
+                    expected_matches=args.expected_matches,
+                    force=args.force,
+                )
+        except (FileExistsError, OSError, RuntimeError, ValueError, zipfile.BadZipFile) as error:
+            print(f"AppKey patch failed: {error}", file=sys.stderr)
             return 2
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0

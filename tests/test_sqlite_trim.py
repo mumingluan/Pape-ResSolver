@@ -5,9 +5,20 @@ import unittest
 from pathlib import Path
 
 from pape_res_solver.sqlite_trim import RUNTIME_SCHEMA, trim_sqlite
+from pape_res_solver.runtime_presets import BOOI_RUNTIME_TABLES, runtime_tables
 
 
 class SQLiteTrimTests(unittest.TestCase):
+    def test_booi_preset_contains_new_runtime_dependencies(self) -> None:
+        required = {
+            "ChapterInfo", "MainLineTask", "MainUIBGM", "MainUIBGMSwitchActivity",
+            "MainUIActorState", "MainUIScene", "MainUIScenePlace", "PhotoGroup",
+            "GemCoreBaseInfo", "GemCoreLevel", "GemRare", "SystemMail",
+        }
+        self.assertTrue(required.issubset(BOOI_RUNTIME_TABLES))
+        self.assertEqual(runtime_tables("booi", ["Extra"])[-1], "X3WeaponSkinConfigs")
+        self.assertIn("Extra", runtime_tables("booi", ["Extra"]))
+
     def test_trims_analysis_tables_and_preserves_config_queries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

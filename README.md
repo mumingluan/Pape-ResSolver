@@ -161,10 +161,17 @@ all named configuration tables:
 python -m pape_res_solver trim `
   .\out\1.7.1546\resources.sqlite `
   .\out\1.7.1546\booi-res.sqlite `
+  --preset booi `
   --resource-version 1.7.1546
 ```
 
-Use repeatable `--table` arguments to retain only an explicit allowlist. For
+`--preset booi` is the maintained BOOI runtime allowlist. It includes every
+configuration table currently decoded by the server, including chapter/BGM,
+main-UI scene and actor state, photo moderation groups, and GemCore dismantle
+economy tables. Repeatable `--table` options may add project-specific tables
+on top of the preset.
+
+Without a preset, use repeatable `--table` arguments to retain an explicit allowlist. For
 example:
 
 ```powershell
@@ -183,6 +190,43 @@ Decoded X3 record containers are promoted with stable `X3<TableName>` names
 shipping raw MessagePack packages.
 The output is built into a temporary file, integrity checked, and atomically
 renamed. Existing outputs are preserved unless `--force` is passed.
+
+## Client AppKey patch generation
+
+Generate both the persistent `XFileZip` archive and the currently expanded NX
+cache after changing an AppKey embedded in logic Lua:
+
+```powershell
+python -m pape_res_solver patch-app-key `
+  D:\path\to\XFileZip\2530387745.zip `
+  .\patched\2530387745.zip `
+  --old-app-key old-app-key-here `
+  --new-app-key new-app-key-here `
+  --nx-output .\patched\2530387745.nx
+```
+
+The two keys must have the same ASCII byte length because changing Lua string
+or NX block lengths would also require rebuilding the NXF index. The command
+expects exactly one match by default, preserves untouched member data, rebuilds
+the archive using the client-tested LZMA ZIP method 14 framing, and reads
+the generated archive back before publishing it. It never overwrites an input
+or existing output unless `--force` is explicitly supplied.
+
+Package IDs are version-specific. To locate the package by content instead of
+supplying its numeric filename, pass an `XFileZip` directory or a resource root.
+The second positional argument then becomes an output directory, and both the
+ZIP and NX names are derived automatically from the uniquely matching archive:
+
+```powershell
+python -m pape_res_solver patch-app-key `
+  D:\path\to\normalized-resources `
+  .\patched `
+  --old-app-key old-app-key-here `
+  --new-app-key new-app-key-here
+```
+
+The scan is restricted to direct ZIP children of `XFileZip` (or a directory of
+ZIPs) and fails safely if no package or more than one NX member matches.
 
 ## Automatic LuaCfg name recovery
 
