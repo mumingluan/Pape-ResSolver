@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import sqlite3
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from .manifest import ResourceManifest
 
 _PACKAGE_FROM_NAME = re.compile(r"^(\d+)")
 _ENTRY_FROM_NAME = re.compile(r"^(\d+)")
+_DIRTYWORDS_TRANSFORM = bytes(c if c in (0x00, 0xCC) else c ^ 0xCC for c in range(256))
 
 
 def _sha256(path: Path) -> str:
@@ -95,6 +97,118 @@ def _table_content_fingerprint(path: Path) -> str | None:
         packages.append((int(row["package_id"]), str(fingerprint)))
     encoded = json.dumps(sorted(packages), separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _decode_dirtywords(source: Path, destination: Path, jsonl: Path) -> dict[str, Any]:
+    raw = source.read_bytes()
+    decoded = bytearray(raw.translate(_DIRTYWORDS_TRANSFORM))
+    if decoded[:16] != b"SQLite format 3\x00":
+        raise ValueError("decoded DirtyWords resource has no SQLite header")
+    db_pages = struct.unpack_from(">I", decoded, 28)[0]
+    if not db_pages or len(decoded) % db_pages:
+        raise ValueError(f"invalid DirtyWords page count: {db_pages}")
+    page_size = len(decoded) // db_pages
+    if page_size < 512 or page_size > 32768 or page_size & (page_size - 1):
+        raise ValueError(f"invalid computed DirtyWords page size: {page_size}")
+    struct.pack_into(">H", decoded, 16, page_size)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(decoded)
+    rows = 0
+    words = 0
+    jsonl.unlink(missing_ok=True)
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    output = jsonl.open("w", encoding="utf-8", newline="\n")
+    connection = sqlite3.connect(destination)
+    try:
+        integrity = connection.execute("pragma integrity_check").fetchone()[0]
+        for row_id, blob in connection.execute("select id, value from DirtyWords order by id"):
+            values: list[str] = []
+            if isinstance(blob, bytes) and blob[:1] == b"\x1a":
+                body = blob[1:]
+                if body.startswith(b"[") and body.endswith(b"]"):
+                    for _, encoded_word in re.findall(rb'(\d+),"(.*?)"', body, re.S):
+                        values.append(encoded_word.decode("utf-8", "replace"))
+            output.write(json.dumps({"id": row_id, "count": len(values), "words": values}, ensure_ascii=False, separators=(",", ":")) + "\n")
+            rows += 1
+            words += len(values)
+    finally:
+        connection.close()
+        output.close()
+    if integrity != "ok":
+        raise ValueError(f"DirtyWords integrity check failed: {integrity}")
+    return {
+        "name": "DirtyWords",
+        "source": str(source),
+        "sqlite_path": str(destination),
+        "jsonl_path": str(jsonl),
+        "rows": rows,
+        "words": words,
+        "page_size": page_size,
+        "db_pages": db_pages,
+        "integrity": integrity,
+    }
+
+
+def _decode_xfilezip_index(source: Path, destination: Path) -> dict[str, Any]:
+    data = bytes(byte ^ 0x0C for byte in source.read_bytes())
+    records: list[bytes] = []
+    offset = 0
+    while offset + 4 <= len(data):
+        size = struct.unpack_from("<I", data, offset)[0]
+        offset += 4
+        if size > len(data) - offset:
+            raise ValueError(f"truncated XFileZip record at {offset - 4}")
+        records.append(data[offset:offset + size])
+        offset += size
+    if offset != len(data):
+        raise ValueError(f"{len(data) - offset} trailing XFileZip bytes")
+    if len(records) < 7:
+        raise ValueError("XFileZip index has too few records")
+
+    def u32(record: bytes) -> int:
+        if len(record) != 4:
+            raise ValueError("XFileZip integer record has invalid length")
+        return struct.unpack("<I", record)[0]
+
+    resource_count = u32(records[5])
+    resource_end = 6 + resource_count * 4
+    if resource_end >= len(records):
+        raise ValueError("XFileZip resource table exceeds record stream")
+    resources = []
+    for index in range(6, resource_end, 4):
+        resources.append({
+            "resource_id": u32(records[index]),
+            "meta_1": u32(records[index + 1]),
+            "meta_2": u32(records[index + 2]),
+            "meta_3": u32(records[index + 3]),
+        })
+    path_count = u32(records[resource_end])
+    path_records = records[resource_end + 1:]
+    if len(path_records) != path_count * 2:
+        raise ValueError(f"XFileZip path count mismatch: declared {path_count}, records {len(path_records) // 2}")
+    paths = []
+    resource_ids = {item["resource_id"] for item in resources}
+    for index in range(0, len(path_records), 2):
+        resource_id = u32(path_records[index])
+        path = path_records[index + 1].decode("utf-8")
+        if resource_id not in resource_ids:
+            raise ValueError(f"XFileZip path references unknown resource {resource_id}")
+        paths.append({"resource_id": resource_id, "path": path})
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8", newline="\n") as output:
+        for row in paths:
+            output.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    return {
+        "name": "XFileZip/210201614",
+        "source": str(source),
+        "jsonl_path": str(destination),
+        "records": len(records),
+        "resource_count": resource_count,
+        "path_count": path_count,
+        "version": records[0].decode("utf-8"),
+        "blob_name": records[1].decode("utf-8"),
+        "checksum": u32(records[4]),
+    }
 
 
 def process_artifacts(
@@ -500,6 +614,38 @@ def _normalize_config_artifacts(
     destination = output / "server_tables" / "config"
     destination.mkdir(parents=True, exist_ok=True)
     result: dict[str, Any] = {"decoded": [], "unresolved": []}
+
+    dirtywords = manifest.root / "config" / "DBCfg" / "DirtyWords.db"
+    if dirtywords.is_file():
+        try:
+            result["decoded"].append(
+                _decode_dirtywords(
+                    dirtywords,
+                    destination / "DirtyWords.sqlite",
+                    destination / "DirtyWords.jsonl",
+                )
+            )
+        except (OSError, UnicodeError, sqlite3.Error, struct.error, ValueError) as error:
+            result["unresolved"].append(
+                {
+                    "path": str(dirtywords.relative_to(manifest.root)).replace("\\", "/"),
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
+
+    xfilezip = manifest.root / "config" / "XFileZip" / "210201614.bin"
+    if xfilezip.is_file():
+        try:
+            result["decoded"].append(
+                _decode_xfilezip_index(xfilezip, destination / "XFileZip_210201614.jsonl")
+            )
+        except (OSError, UnicodeError, struct.error, ValueError) as error:
+            result["unresolved"].append(
+                {
+                    "path": str(xfilezip.relative_to(manifest.root)).replace("\\", "/"),
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
 
     dynamic = manifest.root / "config" / "DynamicVectorCfg.bin"
     if dynamic.is_file():

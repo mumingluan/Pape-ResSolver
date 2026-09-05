@@ -1,26 +1,19 @@
 # Pape-ResSolver
 
-`Pape-ResSolver` converts normalized Pape resource dumps into server-friendly,
-human-readable configuration data while preserving provenance. It is designed
-around the resource manifests rather than fixed package IDs, so the same code
-can be reused across resource versions.
+`Pape-ResSolver` 将规范化后的 Pape 资源转换为适合服务端使用、可读且保留来源信息的配置数据。程序依赖资源清单，不把包 ID 写死，因此可以跨资源版本复用。
 
-The project has three complementary outputs:
+它生成四类产物：
 
-- configuration Lua (`LuaCfg.*`) is statically evaluated and normalized with
-  its `_k` schema into JSONL and SQLite;
-- logic Lua is indexed by resolved source name, dependencies, RPC references,
-  configuration references and content hash.
-- decoded MessagePack, text, X3 and auxiliary config artifacts are cataloged,
-  materialized and consolidated into server-friendly package JSONL files.
-- catalog multilingual resource sets are reconstructed as ID-addressable text
-  in a separate `languages.sqlite`, independent from the main Res database.
+- 对 `LuaCfg.*` 配置 Lua 做静态求值，依据 `_k` 字段表导出 JSONL 和 SQLite；
+- 为逻辑 Lua 建立来源名、依赖、RPC、配置引用和内容哈希索引；
+- 整理 MessagePack、文本、X3 和其他配置资源，生成服务端可读取的 JSONL；
+- 根据 ResGet 的多语言资源清单生成独立的 `languages.sqlite`。
 
-The Lua reader does **not** execute game code. It evaluates the restricted data
-construction subset emitted by the existing Lua 5.3 decompiler, preserving
-integers and representing unsupported expressions explicitly.
+Lua 读取器不会执行游戏代码，只处理现有 Lua 5.3 反编译器输出的受限数据构造语法。无法静态表示的表达式会被明确记录，不会被猜测成普通数值。
 
-## Quick start
+## 环境与快速开始
+
+需要 Python 3.11 及以上版本。部分 Lua 反编译流程还需要 Java 17 及以上版本。
 
 ```powershell
 python -m pape_res_solver extract `
@@ -30,7 +23,7 @@ python -m pape_res_solver extract `
   --materialize-tables hardlink
 ```
 
-Useful focused run while developing:
+开发时可以只提取指定表：
 
 ```powershell
 python -m pape_res_solver extract D:\path\to\normalized-resources `
@@ -39,7 +32,7 @@ python -m pape_res_solver extract D:\path\to\normalized-resources `
   --table GachaGroup --table GachaRule --table GachaDrop
 ```
 
-Output layout:
+典型输出结构：
 
 ```text
 out/<version>/
@@ -60,41 +53,17 @@ out/<version>/
   reports/artifacts.json
 ```
 
-Every catalog entry records the source package, entry index, source path,
-content hash, row count and schema fingerprint. JSONL rows remain clean config
-objects; provenance is available in the catalog and SQLite metadata.
+每条配置目录记录来源包、条目序号、源码路径、内容哈希、行数和 schema 指纹。JSONL 保持为干净的配置对象，来源信息保存在 catalog 和 SQLite 元数据中。
 
-## Extraction model
+## 提取规则
 
-The source manifest's resolved names are authoritative. Package IDs and entry
-numbers are never hard-coded. If the next resource version moves `LuaCfg.Item`
-to another package, the output remains `tables/Item.jsonl` and its new source is
-recorded in `catalog.json`.
+资源清单中的正式名称是唯一依据，程序不会根据包 ID 或条目序号猜表名。如果下一版本把 `LuaCfg.Item` 移到其他包，输出仍然是 `tables/Item.jsonl`，新的来源会写入 `catalog.json`。
 
-The extractor loads standard Lua 5.3 bytecode in a restricted environment.
-Android chunks in the current dump use 32-bit `size_t`; the bytecode converter
-rewrites only binary chunk string-size fields for the local 64-bit Lua 5.3
-runtime. This preserves Lua integers and corrects `SETLIST` ordering artifacts
-that are present in decompiled source. The static source parser remains a
-diagnostic fallback.
+当前 Android Lua 字节码使用 32 位 `size_t`。转换器只调整二进制 chunk 的字符串长度字段，以便本地 64 位 Lua 5.3 运行时读取，同时保留 Lua 整数和 `SETLIST` 顺序。`Vector2`、`Vector3`、`Quaternion`、`Color` 等 Unity 构造器会转换为带标签的 JSON 对象。配置 chunk 无权访问文件、网络、进程、包或 debug API。
 
-Unity value constructors such as `Vector2`, `Vector3`, `Quaternion` and `Color`
-become tagged JSON objects. No filesystem, network, process, package or debug
-APIs are exposed to resource chunks.
+## SQLite 数据库
 
-## SQLite API
-
-`resources.sqlite` contains stable generic tables suitable for a Go or Python
-game server:
-
-- `config_tables` and `config_rows`: named `LuaCfg` tables plus decoded X3
-  runtime tables and their JSON rows;
-- `config_references`: validated Card/Item/Gacha relationships;
-- `lua_scripts` and `lua_dependencies`: source, require, config and RPC index;
-- `resource_packages` and `resource_files`: normalized resource inventory;
-- `decoded_table_rows`: consolidated MessagePack/X3/auxiliary config rows.
-
-Example:
+`resources.sqlite` 包含 `config_tables`、`config_rows`、`config_references`、`lua_scripts`、`lua_dependencies`、`resource_packages`、`resource_files` 和 `decoded_table_rows` 等稳定表。
 
 ```sql
 select json_extract(data_json, '$.FragmentID')
@@ -102,7 +71,7 @@ from config_rows
 where table_name = 'CardBaseInfo' and row_key = '121130';
 ```
 
-The CLI provides the same common lookup without writing SQL:
+也可以直接查询：
 
 ```powershell
 python -m pape_res_solver query .\out\1.7.1546 CardBaseInfo 121130
@@ -111,51 +80,22 @@ python -m pape_res_solver text .\out\1.7.1546 377066
 python -m pape_res_solver verify .\out\1.7.1546
 ```
 
-## Multilanguage SQLite
+## 多语言数据库
 
-`languages.sqlite` is rebuilt atomically from Get's
-`multilanguage/manifest.json`. It does not add rows to `resources.sqlite` or
-the BOOI-trimmed database. Its stable runtime tables are:
+`languages.sqlite` 根据 ResGet 的 `multilanguage/manifest.json` 原子重建，不向 `resources.sqlite` 或 BOOI 紧凑库写入文本镜像。主要表包括 `language_resource_sets`、`language_packages`、`localized_text` 和 `language_metadata`。
 
-- `language_resource_sets`: every catalog language resource set and its counts;
-- `language_packages`: NX/NXF provenance, key type and dependency packages;
-- `localized_text`: `(resource_set_id, text_id) -> UTF-8 text`;
-- `language_metadata`: schema and source-version information.
-
-The resource-set ID is the authoritative cross-version language key. This
-avoids guessing locale names when a regional client publishes only a subset of
-text or voice languages. Servers may attach their own display labels while
-keeping lookups stable:
+资源集 ID 是跨版本语言查找的稳定键：
 
 ```sql
 select text from localized_text
 where resource_set_id = 1000000000001 and text_id = 377066;
 ```
 
-Get downloads the small `Total/XFileZip/*.zip` members already present in its
-normal pipeline; it does not need the much larger `Packages/b_*.zip` image and
-voice aggregates. Incremental Get runs reuse the ordinary download cache and
-regenerate a full resource-set manifest after normalization.
+Solver 默认增量提取。未变化的 Lua、MessagePack、X3 和文本输出会复用；删除的包会同步清理。需要完整重建时使用 `--no-incremental` 或 `--clean`。
 
-Solver extraction is incremental by default when the output directory already
-contains its marker and catalog. Lua configuration rows whose source SHA-256 is
-unchanged are reused in place; changed and retired tables are removed before
-replacement. The language database compares resource-set package fingerprints
-and reuses all text rows when only the game version metadata changed. Use
-`--no-incremental` for a deliberate full rebuild, or `--clean` to recreate the
-entire output directory.
+## BOOI 紧凑 SQLite
 
-Config-name recovery scans only Get packages marked as rebuilt. Logic-script
-facts are cached by bytecode SHA-256, including dependencies, config/RPC
-references and exported source paths. Artifact hardlinks retain their stored
-hashes, and the large MessagePack/X3 tree is reused as a unit whenever Get's
-per-package table fingerprints are unchanged.
-
-## Compact runtime SQLite
-
-The full database also contains Lua indexes, artifact inventory, and decoded
-package research data. Create a smaller server runtime database while keeping
-all named configuration tables:
+使用维护好的 `booi` 预设可以生成 BOOI 运行时数据库：
 
 ```powershell
 python -m pape_res_solver trim `
@@ -165,14 +105,7 @@ python -m pape_res_solver trim `
   --resource-version 1.7.1546
 ```
 
-`--preset booi` is the maintained BOOI runtime allowlist. It includes every
-configuration table currently decoded by the server, including chapter/BGM,
-main-UI scene and actor state, photo moderation groups, and GemCore dismantle
-economy tables. Repeatable `--table` options may add project-specific tables
-on top of the preset.
-
-Without a preset, use repeatable `--table` arguments to retain an explicit allowlist. For
-example:
+也可以显式指定表：
 
 ```powershell
 python -m pape_res_solver trim resources.sqlite booi-res.sqlite `
@@ -181,20 +114,16 @@ python -m pape_res_solver trim resources.sqlite booi-res.sqlite `
   --table GachaAll --table GachaGroup --table GachaRule --table GachaDrop
 ```
 
-The compact database contains `resource_metadata`, `config_tables`,
-`config_rows`, and validated `config_references`. Tables use `WITHOUT ROWID`
-where appropriate. Analysis-only indexes and decoded artifacts are omitted.
-Decoded X3 record containers are promoted with stable `X3<TableName>` names
-(for example `X3WeaponLogicConfigs`, `X3WeaponSkinConfigs`, and
-`X3ActorCfgs`), so semantic battle configuration survives trimming without
-shipping raw MessagePack packages.
-The output is built into a temporary file, integrity checked, and atomically
-renamed. Existing outputs are preserved unless `--force` is passed.
+输出会先写入临时文件，完成完整性检查后再原子替换。使用 `--force` 才会覆盖已有输出。X3 战斗配置会提升为稳定的 `X3<TableName>`，例如 `X3WeaponLogicConfigs`、`X3WeaponSkinConfigs` 和 `X3ActorCfgs`。
 
-## Client AppKey patch generation
+解析阶段还会处理两个已知客户端二进制资源：
 
-Generate both the persistent `XFileZip` archive and the currently expanded NX
-cache after changing an AppKey embedded in logic Lua:
+- `config/DBCfg/DirtyWords.db` 会还原为 `server_tables/config/DirtyWords.sqlite`，并导出 `DirtyWords.jsonl`；
+- `config/XFileZip/210201614.bin` 会导出为 `XFileZip_210201614.jsonl`。
+
+两个解析器都会校验记录数量，并把结果写入 `reports/artifacts.json`。尚未识别的 `MultiLanguagePackageManiFest.bin` 会继续列在未解析报告中。
+
+## 客户端 AppKey 修补
 
 ```powershell
 python -m pape_res_solver patch-app-key `
@@ -205,59 +134,22 @@ python -m pape_res_solver patch-app-key `
   --nx-output .\patched\2530387745.nx
 ```
 
-The two keys must have the same ASCII byte length because changing Lua string
-or NX block lengths would also require rebuilding the NXF index. The command
-expects exactly one match by default, preserves untouched member data, rebuilds
-the archive using the client-tested LZMA ZIP method 14 framing, and reads
-the generated archive back before publishing it. It never overwrites an input
-or existing output unless `--force` is explicitly supplied.
+新旧 key 必须拥有相同的 ASCII 字节长度。程序默认要求恰好匹配一次，会保留未修改内容，并在输出后重新读取验证。不同资源版本的包 ID 可能不同，也可以直接传入 XFileZip 目录或规范化资源根目录让程序按内容查找。
 
-Package IDs are version-specific. To locate the package by content instead of
-supplying its numeric filename, pass an `XFileZip` directory or a resource root.
-The second positional argument then becomes an output directory, and both the
-ZIP and NX names are derived automatically from the uniquely matching archive:
+## LuaCfg 表名恢复
 
-```powershell
-python -m pape_res_solver patch-app-key `
-  D:\path\to\normalized-resources `
-  .\patched `
-  --old-app-key old-app-key-here `
-  --new-app-key new-app-key-here
-```
+Solver 会从 Lua 的 `LuaCfgMgr` 调用点提取正式注册名，并使用精确的 XLua CRC，或游戏字段访问与配置 schema 的唯一互证，恢复被裁剪或热修表的名称。
 
-The scan is restricted to direct ZIP children of `XFileZip` (or a directory of
-ZIPs) and fails safely if no package or more than one NX member matches.
+无法形成唯一证据的候选会保留为未解析项，写入 `reports/config_name_resolution.json`，不会生成 `Recovered.*` 猜测表。
 
-## Automatic LuaCfg name recovery
+## 物化方式
 
-The solver does not require compatibility rows such as `Recovered.*` for
-stripped or hotfix configuration chunks. Before extraction it scans game Lua
-calls for authoritative `LuaCfgMgr` registry names and resolves chunks using:
+- `hardlink`（默认）：同卷时使用硬链接，失败后复制；
+- `copy`：生成独立副本；
+- `none`：只生成 catalog 和汇总产物。
 
-1. an exact XLua CRC match for ordinary `LuaCfg.<Table>` chunks; or
-2. a unique, reciprocal match between fields used by game code and the schema
-   returned by an executable configuration chunk when a hotfix uses a physical
-   name different from its registry name.
+`--clean` 只删除带有 Pape-ResSolver 输出标记的目录，不会递归删除任意未标记目录。
 
-Only evidence-backed unique matches are accepted. Ambiguous candidates remain
-unresolved and are listed in `reports/config_name_resolution.json`; names are
-never guessed. The recovered canonical table names flow into JSONL, SQLite,
-Lua indexing, verification, and compact runtime SQLite outputs automatically.
+## 仓库边界
 
-## Materialization modes
-
-- `hardlink` (default): self-contained output on the same volume without
-  duplicating physical table bytes; falls back to copying when unsupported.
-- `copy`: ordinary independent copies.
-- `none`: catalog and consolidated outputs only.
-
-`--clean` only removes directories containing Pape-ResSolver's output marker.
-It refuses to recursively remove an arbitrary unmarked directory.
-
-## Repository hygiene
-
-Recovered resource inputs and generated outputs are intentionally excluded from
-Git. Keep them in `resources/`, `source/`, `input/` or `out/`, or outside the
-repository entirely. Only the original solver source code, tests and
-documentation are intended for publication under MIT; see `NOTICE` for the
-third-party data boundary.
+资源输入和生成目录不会提交到 Git。它们应放在 `resources/`、`source/`、`input/`、`out/` 或仓库外。仓库只发布工具源码、测试和文档，遵循 MIT License；第三方组件和数据边界见 `NOTICE`。
